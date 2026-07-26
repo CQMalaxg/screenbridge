@@ -1,0 +1,32 @@
+{
+  "name": "screenbridge",
+  "version": "0.1.0",
+  "description": "屏桥 ScreenBridge - LAN screen bridge and vision LLM assistant",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "check": "node --check main.js && node --check preload.js && node --check renderer/renderer.js"
+  },
+  "build": {
+    "appId": "com.cqmalaxg.screenbridge",
+    "productName": "屏桥 ScreenBridge",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  },
+  "devDependencies": {
+    "electron": "^36.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

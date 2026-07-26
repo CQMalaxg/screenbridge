@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' https: http:; img-src 'self' data: blob: http:; style-src 'self'; script-src 'self';"
+    />
+    <title>屏桥 ScreenBridge</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <video id="screenMonitor" autoplay muted playsinline aria-hidden="true"></video>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">LOCAL VISION ASSISTANT</div>
+          <h1>屏桥 ScreenBridge</h1>
+          <p class="subtitle">截图后交给视觉模型，快速整理思路与回答。</p>
+        </div>
+        <div class="shortcut-pill" id="shortcutStatus">屏幕监听中</div>
+      </header>
+
+      <section class="workspace">
+        <div class="left-column">
+          <section class="card capture-card">
+            <div class="section-heading">
+              <div>
+                <span class="step">01</span>
+                <h2>获取题目</h2>
+              </div>
+              <span class="muted" id="captureStatus">正在启动屏幕监听…</span>
+            </div>
+
+            <div class="preview-wrap" id="previewWrap">
+              <div class="empty-preview" id="emptyPreview">
+                <div class="capture-icon">⌁</div>
+                <strong>还没有截图</strong>
+                <span>点击按钮，或按 Ctrl + Shift + S</span>
+              </div>
+              <img id="screenPreview" alt="屏幕截图预览" />
+            </div>
+
+            <div class="action-row">
+              <button class="primary-button" id="captureAnalyzeButton">截图并分析</button>
+              <button class="ghost-button" id="clearButton">清除</button>
+            </div>
+          </section>
+
+          <section class="card prompt-card">
+            <div class="section-heading">
+              <div>
+                <span class="step">02</span>
+                <h2>告诉模型怎么答</h2>
+              </div>
+            </div>
+            <textarea id="promptInput" rows="5">请阅读截图中的题目，先给出结论，再给出简洁、可直接使用的回答。若是编程题，请说明思路、复杂度和关键代码。</textarea>
+            <div class="hint">建议只截取题目相关区域，图片越小，响应通常越快。</div>
+            <div class="action-row">
+              <button class="ghost-button" id="stopButton" disabled>停止生成</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="right-column">
+          <section class="card answer-card">
+            <div class="section-heading">
+              <div>
+                <span class="step">03</span>
+                <h2>模型回答</h2>
+              </div>
+              <button class="text-button" id="copyButton">复制</button>
+            </div>
+            <div class="answer-box" id="answerBox">
+              <div class="answer-placeholder" id="answerPlaceholder">回答会显示在这里</div>
+              <div id="answerText"></div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="utility-grid">
+        <section class="card lan-card">
+          <div class="section-heading">
+            <div>
+              <span class="step">LAN</span>
+              <h2>远程屏幕</h2>
+            </div>
+            <span class="muted" id="lanStatus">未连接</span>
+          </div>
+          <div class="lan-actions">
+            <button class="secondary-button" id="startShareButton">启动共享端</button>
+            <button class="ghost-button" id="minimizeShareButton" disabled>最小化共享端</button>
+          </div>
+          <div class="share-info" id="shareInfo">在题目所在电脑启动共享端，然后把地址和配对码填到另一台电脑。</div>
+          <label>
+            远程设备地址
+            <input id="remoteUrlInput" type="url" placeholder="http://192.168.1.20:8765" />
+          </label>
+          <label>
+            配对码
+            <input id="remoteTokenInput" type="text" placeholder="例如 7F2A91C0" autocomplete="off" />
+          </label>
+          <div class="action-row">
+            <button class="primary-button" id="connectRemoteButton">连接远程屏幕</button>
+            <button class="ghost-button" id="disconnectRemoteButton" disabled>断开</button>
+          </div>
+          <div class="hint">两台电脑需要在同一个局域网。共享端启动后建议最小化窗口，避免把共享端 App 自己录进去。</div>
+        </section>
+
+        <section class="card settings-card">
+          <div class="section-heading">
+            <div>
+              <span class="step">设置</span>
+              <h2>视觉模型</h2>
+            </div>
+            <span class="muted" id="saveStatus">本地保存</span>
+          </div>
+          <label>
+            API 地址
+            <input id="baseUrlInput" type="url" placeholder="https://right.ai/grok/v1" />
+          </label>
+          <label>
+            API 协议
+            <select id="apiBackendInput">
+              <option value="responses">Responses API</option>
+              <option value="chat_completions">Chat Completions</option>
+            </select>
+          </label>
+          <label>
+            模型名称
+            <input id="modelInput" type="text" placeholder="grok-4.5" />
+          </label>
+          <label>
+            API Key <span class="optional">可选，本地模型可留空</span>
+            <input id="apiKeyInput" type="password" placeholder="sk-..." autocomplete="off" />
+          </label>
+          <label>
+            HTTP 代理 <span class="optional">可选，例如 http://127.0.0.1:7897</span>
+            <input id="proxyUrlInput" type="text" placeholder="留空表示不使用代理" />
+          </label>
+          <button class="secondary-button" id="saveButton">保存模型设置</button>
+          <div class="security-note">截图默认只在内存中处理，不写入本地文件。请确认模型服务符合你的隐私要求。</div>
+        </section>
+      </section>
+
+      <footer class="footer-note">
+        当前版本支持单机截图，也支持局域网共享端与助手端。
+      </footer>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>
