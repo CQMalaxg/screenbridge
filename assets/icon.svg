@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="ScreenBridge icon">
+  <defs>
+    <linearGradient id="background" x1="110" y1="80" x2="910" y2="950" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7168F2"/>
+      <stop offset="1" stop-color="#F07B68"/>
+    </linearGradient>
+    <linearGradient id="leftScreen" x1="170" y1="300" x2="460" y2="580" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#31356B"/>
+      <stop offset="1" stop-color="#202444"/>
+    </linearGradient>
+    <linearGradient id="rightScreen" x1="560" y1="300" x2="850" y2="580" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#513952"/>
+      <stop offset="1" stop-color="#2B263F"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="20" stdDeviation="22" flood-color="#0B1020" flood-opacity=".28"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#background)"/>
+  <rect x="112" y="112" width="800" height="800" rx="184" fill="#151A2C" opacity=".94"/>
+
+  <g filter="url(#shadow)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M348 447 C418 255 606 255 676 447" fill="none" stroke="#F7F8FF" stroke-width="34"/>
+    <circle cx="348" cy="447" r="18" fill="#F7F8FF"/>
+    <circle cx="676" cy="447" r="18" fill="#F7F8FF"/>
+
+    <rect x="168" y="340" width="282" height="218" rx="42" fill="url(#leftScreen)" stroke="#928BFF" stroke-width="18"/>
+    <rect x="574" y="340" width="282" height="218" rx="42" fill="url(#rightScreen)" stroke="#FF9A78" stroke-width="18"/>
+
+    <path d="M248 628 H372" stroke="#928BFF" stroke-width="24"/>
+    <path d="M654 628 H778" stroke="#FF9A78" stroke-width="24"/>
+    <path d="M310 558 V628 M714 558 V628" stroke="#F7F8FF" stroke-width="20"/>
+
+    <rect x="232" y="405" width="112" height="22" rx="11" fill="#BDB8FF" opacity=".95"/>
+    <rect x="232" y="455" width="166" height="18" rx="9" fill="#7773C9" opacity=".75"/>
+    <circle cx="374" cy="416" r="18" fill="#F7F8FF"/>
+
+    <rect x="638" y="405" width="112" height="22" rx="11" fill="#FFC0A9" opacity=".95"/>
+    <rect x="638" y="455" width="166" height="18" rx="9" fill="#A96268" opacity=".8"/>
+    <circle cx="780" cy="416" r="18" fill="#F7F8FF"/>
+  </g>
+</svg>

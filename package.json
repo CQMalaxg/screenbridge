@@ -2,6 +2,8 @@
   "name": "screenbridge",
   "version": "0.1.0",
   "description": "屏桥 ScreenBridge - LAN screen bridge and vision LLM assistant",
+  "author": "CQMalaxg",
+  "license": "MIT",
   "main": "main.js",
   "private": true,
   "scripts": {
@@ -16,10 +18,12 @@
       "main.js",
       "preload.js",
       "renderer/**/*",
+      "assets/**/*",
       "package.json"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "assets/icon.ico"
     }
   },
   "devDependencies": {
