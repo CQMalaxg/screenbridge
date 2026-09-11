@@ -184,6 +184,23 @@ function extractScreenSource() {
     });
 }
 
+function isRightCodeEndpoint(baseUrl) {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return ['right.codes', 'www.right.codes', 'right.ai', 'www.right.ai'].includes(hostname);
+  } catch {
+    return false;
+  }
+}
+
+function resolveApiBackend(config) {
+  if (config.apiBackend === 'chat_completions') return 'chat_completions';
+  if (config.apiBackend === 'responses' && isRightCodeEndpoint(config.baseUrl)) {
+    return 'chat_completions';
+  }
+  return 'responses';
+}
+
 function getLanAddresses() {
   const addresses = [];
   for (const interfaces of Object.values(os.networkInterfaces())) {
@@ -305,7 +322,11 @@ async function streamChatCompletion({ imageDataUrl, prompt }) {
   if (!config.baseUrl) throw new Error('请先填写模型 API 地址');
   if (!config.model) throw new Error('请先填写模型名称');
 
-  const apiBackend = config.apiBackend === 'chat_completions' ? 'chat_completions' : 'responses';
+  if (typeof imageDataUrl !== 'string' || !imageDataUrl.startsWith('data:image/')) {
+    throw new Error('截图数据无效，请重新点击“截图并分析”');
+  }
+
+  const apiBackend = resolveApiBackend(config);
   const endpoint = `${config.baseUrl.replace(/\/+$/, '')}/${apiBackend === 'responses' ? 'responses' : 'chat/completions'}`;
   const headers = { 'Content-Type': 'application/json' };
   if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
@@ -320,7 +341,7 @@ async function streamChatCompletion({ imageDataUrl, prompt }) {
             role: 'user',
             content: [
               { type: 'input_text', text: prompt },
-              { type: 'input_image', image_url: imageDataUrl }
+              { type: 'input_image', image_url: imageDataUrl, detail: 'high' }
             ]
           }
         ]
@@ -335,7 +356,7 @@ async function streamChatCompletion({ imageDataUrl, prompt }) {
             role: 'user',
             content: [
               { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: imageDataUrl } }
+              { type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } }
             ]
           }
         ]

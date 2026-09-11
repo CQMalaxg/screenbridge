@@ -223,6 +223,9 @@ function compressImage(dataUrl) {
 }
 
 function receiveScreenshot(dataUrl) {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+    throw new Error('截图数据无效');
+  }
   currentImageDataUrl = dataUrl;
   elements.screenPreview.src = dataUrl;
   elements.previewWrap.classList.add('has-image');
@@ -400,6 +403,9 @@ async function captureAndAnalyze() {
   try {
     setCaptureStatus('正在获取当前屏幕…');
     const screenshot = await captureCurrentScreen();
+    if (typeof screenshot !== 'string' || !screenshot.startsWith('data:image/')) {
+      throw new Error('没有获取到有效截图，请重试');
+    }
     receiveScreenshot(screenshot);
     await saveConfig(false);
     const imageDataUrl = await compressImage(screenshot);
