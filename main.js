@@ -187,7 +187,14 @@ function extractScreenSource() {
 function isRightCodeEndpoint(baseUrl) {
   try {
     const hostname = new URL(baseUrl).hostname.toLowerCase();
-    return ['right.codes', 'www.right.codes', 'right.ai', 'www.right.ai'].includes(hostname);
+    return [
+      'right.codes',
+      'www.right.codes',
+      'right.ai',
+      'www.right.ai',
+      'rightapi.ai',
+      'www.rightapi.ai'
+    ].includes(hostname);
   } catch {
     return false;
   }
