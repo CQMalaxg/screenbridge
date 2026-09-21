@@ -42,8 +42,13 @@
               <img id="screenPreview" alt="屏幕截图预览" />
             </div>
 
-            <div class="action-row">
+            <div class="quick-run-row">
+              <label for="requestPresetSelect">分析预设</label>
+              <select id="requestPresetSelect" aria-label="选择本次分析使用的模型预设"></select>
+            </div>
+            <div class="action-row capture-actions">
               <button class="primary-button" id="captureAnalyzeButton">截图并分析</button>
+              <button class="secondary-button" id="retryAnalyzeButton" disabled>用当前截图重试</button>
               <button class="ghost-button" id="clearButton">清除</button>
             </div>
           </section>
@@ -113,9 +118,28 @@
           <div class="section-heading">
             <div>
               <span class="step">设置</span>
-              <h2>视觉模型</h2>
+              <h2>模型预设</h2>
             </div>
             <span class="muted" id="saveStatus">本地保存</span>
+          </div>
+          <div class="preset-toolbar">
+            <select id="presetSelect" aria-label="编辑模型预设"></select>
+            <button class="icon-text-button" id="addPresetButton" type="button">新增</button>
+            <button class="icon-text-button danger-button" id="deletePresetButton" type="button">删除</button>
+          </div>
+          <label>
+            预设名称
+            <input id="presetNameInput" type="text" placeholder="例如 主力模型" />
+          </label>
+          <div class="settings-row">
+            <label>
+              请求优先级
+              <input id="priorityInput" type="number" min="1" max="999" step="1" />
+            </label>
+            <label class="check-field">
+              <input id="presetEnabledInput" type="checkbox" />
+              <span>参与自动切换</span>
+            </label>
           </div>
           <label>
             API 地址
@@ -140,8 +164,12 @@
             HTTP 代理 <span class="optional">可选，例如 http://127.0.0.1:7897</span>
             <input id="proxyUrlInput" type="text" placeholder="留空表示不使用代理" />
           </label>
-          <button class="secondary-button" id="saveButton">保存模型设置</button>
-          <div class="security-note">截图默认只在内存中处理，不写入本地文件。请确认模型服务符合你的隐私要求。</div>
+          <label class="check-field auto-fallback-field">
+            <input id="autoFallbackInput" type="checkbox" />
+            <span>请求失败时按优先级自动尝试其他已启用预设</span>
+          </label>
+          <button class="secondary-button" id="saveButton">保存全部预设</button>
+          <div class="security-note">API Key 随各预设保存在本机。截图默认只在内存中处理，不写入本地文件。</div>
         </section>
       </section>
 

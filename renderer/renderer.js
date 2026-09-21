@@ -2,6 +2,7 @@ const api = window.assistantAPI;
 
 const elements = {
   captureAnalyzeButton: document.getElementById('captureAnalyzeButton'),
+  retryAnalyzeButton: document.getElementById('retryAnalyzeButton'),
   clearButton: document.getElementById('clearButton'),
   stopButton: document.getElementById('stopButton'),
   copyButton: document.getElementById('copyButton'),
@@ -15,6 +16,14 @@ const elements = {
   captureStatus: document.getElementById('captureStatus'),
   shortcutStatus: document.getElementById('shortcutStatus'),
   saveStatus: document.getElementById('saveStatus'),
+  requestPresetSelect: document.getElementById('requestPresetSelect'),
+  presetSelect: document.getElementById('presetSelect'),
+  addPresetButton: document.getElementById('addPresetButton'),
+  deletePresetButton: document.getElementById('deletePresetButton'),
+  presetNameInput: document.getElementById('presetNameInput'),
+  priorityInput: document.getElementById('priorityInput'),
+  presetEnabledInput: document.getElementById('presetEnabledInput'),
+  autoFallbackInput: document.getElementById('autoFallbackInput'),
   baseUrlInput: document.getElementById('baseUrlInput'),
   apiBackendInput: document.getElementById('apiBackendInput'),
   modelInput: document.getElementById('modelInput'),
@@ -40,6 +49,8 @@ let remoteBaseUrl = '';
 let remoteToken = '';
 let remotePollTimer = null;
 let remotePolling = false;
+let appConfig = null;
+let editingPresetId = '';
 
 function escapeHtml(value) {
   return String(value)
@@ -177,6 +188,7 @@ function setAnswer(text) {
 function setGenerating(value) {
   isGenerating = value;
   elements.captureAnalyzeButton.disabled = value;
+  elements.retryAnalyzeButton.disabled = value || !currentImageDataUrl;
   elements.stopButton.disabled = !value;
 }
 
@@ -185,23 +197,104 @@ function setLanStatus(text, isError = false) {
   elements.lanStatus.style.color = isError ? '#d95e5e' : '';
 }
 
-function getConfigFromForm() {
-  return {
-    baseUrl: elements.baseUrlInput.value,
+function activePreset() {
+  return appConfig && appConfig.presets.find((preset) => preset.id === editingPresetId);
+}
+
+function commitPresetForm() {
+  const preset = activePreset();
+  if (!preset) return;
+  const priority = Number.parseInt(elements.priorityInput.value, 10);
+  Object.assign(preset, {
+    name: elements.presetNameInput.value.trim() || '未命名预设',
+    priority: Number.isFinite(priority) && priority > 0 ? priority : 1,
+    enabled: elements.presetEnabledInput.checked,
+    baseUrl: elements.baseUrlInput.value.trim(),
     apiBackend: elements.apiBackendInput.value,
-    model: elements.modelInput.value,
-    apiKey: elements.apiKeyInput.value,
-    proxyUrl: elements.proxyUrlInput.value,
-    systemPrompt: '你是一个面试练习助手。请准确阅读截图内容，先给出结论，再给出简洁、可直接使用的回答。信息不足时请明确指出。'
-  };
+    model: elements.modelInput.value.trim(),
+    apiKey: elements.apiKeyInput.value.trim(),
+    proxyUrl: elements.proxyUrlInput.value.trim()
+  });
+}
+
+function renderPresetOptions() {
+  const options = appConfig.presets
+    .map((preset) => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)} · P${preset.priority}</option>`)
+    .join('');
+  elements.presetSelect.innerHTML = options;
+  elements.requestPresetSelect.innerHTML = options;
+  elements.presetSelect.value = appConfig.activePresetId;
+  elements.requestPresetSelect.value = appConfig.activePresetId;
+  elements.deletePresetButton.disabled = appConfig.presets.length <= 1;
+}
+
+function renderPresetForm(presetId) {
+  const preset = appConfig.presets.find((item) => item.id === presetId) || appConfig.presets[0];
+  editingPresetId = preset.id;
+  appConfig.activePresetId = preset.id;
+  elements.presetSelect.value = preset.id;
+  elements.requestPresetSelect.value = preset.id;
+  elements.presetNameInput.value = preset.name || '';
+  elements.priorityInput.value = preset.priority || 1;
+  elements.presetEnabledInput.checked = preset.enabled !== false;
+  elements.baseUrlInput.value = preset.baseUrl || '';
+  elements.apiBackendInput.value = preset.apiBackend || 'responses';
+  elements.modelInput.value = preset.model || '';
+  elements.apiKeyInput.value = preset.apiKey || '';
+  elements.proxyUrlInput.value = preset.proxyUrl || '';
+  elements.autoFallbackInput.checked = appConfig.autoFallback !== false;
 }
 
 function loadConfig(config) {
-  elements.baseUrlInput.value = config.baseUrl || '';
-  elements.apiBackendInput.value = config.apiBackend || 'responses';
-  elements.modelInput.value = config.model || '';
-  elements.apiKeyInput.value = config.apiKey || '';
-  elements.proxyUrlInput.value = config.proxyUrl || '';
+  appConfig = {
+    activePresetId: config.activePresetId,
+    autoFallback: config.autoFallback !== false,
+    systemPrompt: config.systemPrompt,
+    presets: Array.isArray(config.presets) ? config.presets.map((preset) => ({ ...preset })) : []
+  };
+  if (!appConfig.presets.length) throw new Error('没有可用的模型预设');
+  if (!appConfig.presets.some((preset) => preset.id === appConfig.activePresetId)) {
+    appConfig.activePresetId = appConfig.presets[0].id;
+  }
+  renderPresetOptions();
+  renderPresetForm(appConfig.activePresetId);
+}
+
+function createPresetId() {
+  return `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function addPreset() {
+  commitPresetForm();
+  const current = activePreset();
+  const nextPriority = Math.max(...appConfig.presets.map((preset) => preset.priority || 0)) + 1;
+  const preset = {
+    id: createPresetId(),
+    name: `新预设 ${appConfig.presets.length + 1}`,
+    baseUrl: current ? current.baseUrl : '',
+    model: '',
+    apiBackend: current ? current.apiBackend : 'responses',
+    apiKey: current ? current.apiKey : '',
+    proxyUrl: current ? current.proxyUrl : '',
+    enabled: true,
+    priority: nextPriority
+  };
+  appConfig.presets.push(preset);
+  appConfig.activePresetId = preset.id;
+  renderPresetOptions();
+  renderPresetForm(preset.id);
+  elements.presetNameInput.focus();
+  elements.presetNameInput.select();
+}
+
+function deletePreset() {
+  if (appConfig.presets.length <= 1) return;
+  const index = appConfig.presets.findIndex((preset) => preset.id === editingPresetId);
+  appConfig.presets.splice(index, 1);
+  const nextPreset = appConfig.presets[Math.min(index, appConfig.presets.length - 1)];
+  appConfig.activePresetId = nextPreset.id;
+  renderPresetOptions();
+  renderPresetForm(nextPreset.id);
 }
 
 function compressImage(dataUrl) {
@@ -229,6 +322,7 @@ function receiveScreenshot(dataUrl) {
   currentImageDataUrl = dataUrl;
   elements.screenPreview.src = dataUrl;
   elements.previewWrap.classList.add('has-image');
+  elements.retryAnalyzeButton.disabled = isGenerating;
   setCaptureStatus('已截图，准备分析');
   setAnswer('');
 }
@@ -389,12 +483,33 @@ async function captureCurrentScreen() {
 }
 
 async function saveConfig(showStatus = true) {
-  const config = await api.saveConfig(getConfigFromForm());
+  if (!appConfig) throw new Error('模型预设尚未加载完成');
+  commitPresetForm();
+  appConfig.autoFallback = elements.autoFallbackInput.checked;
+  appConfig.activePresetId = editingPresetId;
+  const config = await api.saveConfig(appConfig);
   loadConfig(config);
   if (showStatus) {
     elements.saveStatus.textContent = '已保存';
     setTimeout(() => { elements.saveStatus.textContent = '本地保存'; }, 1800);
   }
+}
+
+async function analyzeScreenshot(screenshot) {
+  if (typeof screenshot !== 'string' || !screenshot.startsWith('data:image/')) {
+    throw new Error('没有获取到有效截图，请重试');
+  }
+  receiveScreenshot(screenshot);
+  await saveConfig(false);
+  const imageDataUrl = await compressImage(screenshot);
+  setAnswer('');
+  setGenerating(true);
+  setCaptureStatus('正在分析…');
+  await api.analyzeImage({
+    imageDataUrl,
+    prompt: elements.promptInput.value.trim() || '请分析这张截图并给出回答。',
+    presetId: appConfig.activePresetId
+  });
 }
 
 async function captureAndAnalyze() {
@@ -403,19 +518,18 @@ async function captureAndAnalyze() {
   try {
     setCaptureStatus('正在获取当前屏幕…');
     const screenshot = await captureCurrentScreen();
-    if (typeof screenshot !== 'string' || !screenshot.startsWith('data:image/')) {
-      throw new Error('没有获取到有效截图，请重试');
-    }
-    receiveScreenshot(screenshot);
-    await saveConfig(false);
-    const imageDataUrl = await compressImage(screenshot);
-    setAnswer('');
-    setGenerating(true);
-    setCaptureStatus('正在分析…');
-    await api.analyzeImage({
-      imageDataUrl,
-      prompt: elements.promptInput.value.trim() || '请分析这张截图并给出回答。'
-    });
+    await analyzeScreenshot(screenshot);
+  } catch (error) {
+    setGenerating(false);
+    setCaptureStatus('分析失败', true);
+    setAnswer(`分析失败：\n${error.message || error}`);
+  }
+}
+
+async function retryCurrentScreenshot() {
+  if (isGenerating || !currentImageDataUrl) return;
+  try {
+    await analyzeScreenshot(currentImageDataUrl);
   } catch (error) {
     setGenerating(false);
     setCaptureStatus('分析失败', true);
@@ -427,11 +541,13 @@ function clearAll() {
   currentImageDataUrl = '';
   elements.screenPreview.removeAttribute('src');
   elements.previewWrap.classList.remove('has-image');
+  elements.retryAnalyzeButton.disabled = true;
   setCaptureStatus(remoteConnected ? '远程屏幕连接中' : (monitorStarted ? '屏幕监听中，点击“截图并分析”' : '等待截图'));
   setAnswer('');
 }
 
 elements.captureAnalyzeButton.addEventListener('click', captureAndAnalyze);
+elements.retryAnalyzeButton.addEventListener('click', retryCurrentScreenshot);
 elements.clearButton.addEventListener('click', clearAll);
 elements.startShareButton.addEventListener('click', startShare);
 elements.minimizeShareButton.addEventListener('click', minimizeShare);
@@ -440,7 +556,27 @@ elements.disconnectRemoteButton.addEventListener('click', disconnectRemote);
 elements.stopButton.addEventListener('click', async () => {
   await api.stopAnalysis();
 });
-elements.saveButton.addEventListener('click', () => saveConfig(true));
+elements.addPresetButton.addEventListener('click', addPreset);
+elements.deletePresetButton.addEventListener('click', deletePreset);
+elements.presetSelect.addEventListener('change', (event) => {
+  commitPresetForm();
+  appConfig.autoFallback = elements.autoFallbackInput.checked;
+  appConfig.activePresetId = event.target.value;
+  renderPresetOptions();
+  renderPresetForm(appConfig.activePresetId);
+});
+elements.requestPresetSelect.addEventListener('change', (event) => {
+  commitPresetForm();
+  appConfig.autoFallback = elements.autoFallbackInput.checked;
+  appConfig.activePresetId = event.target.value;
+  renderPresetOptions();
+  renderPresetForm(appConfig.activePresetId);
+});
+elements.saveButton.addEventListener('click', () => {
+  saveConfig(true).catch((error) => {
+    elements.saveStatus.textContent = error.message || '保存失败';
+  });
+});
 elements.copyButton.addEventListener('click', async () => {
   const answer = answerMarkdown.trim();
   if (!answer) return;
@@ -451,15 +587,23 @@ elements.copyButton.addEventListener('click', async () => {
 
 api.onScreenCaptured(receiveScreenshot);
 api.onCaptureError((message) => setCaptureStatus(message, true));
+api.onAnalysisAttempt((details) => {
+  setAnswer('');
+  setCaptureStatus(`正在使用 ${details.presetName}（${details.attempt}/${details.total}）…`);
+});
+api.onAnalysisFallback((details) => {
+  setCaptureStatus(`${details.failedPresetName} 请求失败，正在切换到 ${details.nextPresetName}…`, true);
+});
 api.onAnalysisChunk((chunk) => {
   answerMarkdown += chunk;
   elements.answerText.innerHTML = renderMarkdown(answerMarkdown);
   elements.answerPlaceholder.style.display = 'none';
   elements.answerText.parentElement.scrollTop = elements.answerText.parentElement.scrollHeight;
 });
-api.onAnalysisComplete(() => {
+api.onAnalysisComplete((details) => {
   setGenerating(false);
-  setCaptureStatus(remoteConnected ? '分析完成，可再次点击按钮' : (monitorStarted ? '分析完成，可再次点击按钮' : '分析完成'));
+  const suffix = details && details.attempts > 1 ? `，已切换到 ${details.presetName}` : '';
+  setCaptureStatus(`分析完成${suffix}，可再次点击按钮`);
 });
 api.onAnalysisStopped(() => {
   setGenerating(false);

@@ -23,18 +23,50 @@ let lanShareToken = '';
 let lanShareFrame = null;
 let lanShareCapturing = false;
 
-const defaultConfig = {
+const defaultSystemPrompt =
+  '你是一个面试练习助手。请准确阅读截图内容，先给出结论，再给出简洁、可直接使用的回答。信息不足时请明确指出。';
+
+const defaultPreset = {
+  id: 'default',
+  name: '默认模型',
   baseUrl: 'https://right.ai/grok/v1',
   model: 'grok-4.5',
   apiBackend: 'responses',
   apiKey: '',
   proxyUrl: '',
-  systemPrompt:
-    '你是一个面试练习助手。请准确阅读截图内容，先给出结论，再给出简洁、可直接使用的回答。信息不足时请明确指出。'
+  enabled: true,
+  priority: 1
 };
 
 function configPath() {
   return path.join(app.getPath('userData'), 'config.json');
+}
+
+function decryptApiKey(input) {
+  if (input.encryptedApiKey && safeStorage.isEncryptionAvailable()) {
+    try {
+      return safeStorage.decryptString(Buffer.from(input.encryptedApiKey, 'base64'));
+    } catch {
+      return '';
+    }
+  }
+  return String(input.apiKey || '');
+}
+
+function normalizePreset(input, index = 0) {
+  const fallbackId = index === 0 ? defaultPreset.id : `preset-${index + 1}`;
+  const parsedPriority = Number.parseInt(input.priority, 10);
+  return {
+    id: String(input.id || fallbackId).trim() || fallbackId,
+    name: String(input.name || `模型 ${index + 1}`).trim() || `模型 ${index + 1}`,
+    baseUrl: String(input.baseUrl || '').trim(),
+    model: String(input.model || '').trim(),
+    apiBackend: input.apiBackend === 'chat_completions' ? 'chat_completions' : 'responses',
+    apiKey: String(input.apiKey || '').trim(),
+    proxyUrl: String(input.proxyUrl || '').trim(),
+    enabled: input.enabled !== false,
+    priority: Number.isFinite(parsedPriority) && parsedPriority > 0 ? parsedPriority : index + 1
+  };
 }
 
 function readConfig() {
@@ -45,41 +77,63 @@ function readConfig() {
     stored = {};
   }
 
-  let apiKey = stored.apiKey || '';
-  if (stored.encryptedApiKey && safeStorage.isEncryptionAvailable()) {
-    try {
-      apiKey = safeStorage.decryptString(Buffer.from(stored.encryptedApiKey, 'base64'));
-    } catch {
-      apiKey = '';
-    }
+  let presets;
+  if (Array.isArray(stored.presets) && stored.presets.length) {
+    presets = stored.presets.map((preset, index) => normalizePreset({
+      ...preset,
+      apiKey: decryptApiKey(preset)
+    }, index));
+  } else {
+    // Migrate the original single-model configuration without losing its API key.
+    presets = [normalizePreset({
+      ...defaultPreset,
+      baseUrl: stored.baseUrl || defaultPreset.baseUrl,
+      model: stored.model || defaultPreset.model,
+      apiBackend: stored.apiBackend || defaultPreset.apiBackend,
+      apiKey: decryptApiKey(stored),
+      proxyUrl: stored.proxyUrl || defaultPreset.proxyUrl
+    })];
   }
 
+  const activePresetId = presets.some((preset) => preset.id === stored.activePresetId)
+    ? stored.activePresetId
+    : presets[0].id;
   return {
-    ...defaultConfig,
-    ...stored,
-    apiKey
+    activePresetId,
+    autoFallback: stored.autoFallback !== false,
+    presets,
+    systemPrompt: String(stored.systemPrompt || defaultSystemPrompt).trim()
   };
 }
 
 function writeConfig(input) {
-  const config = {
-    baseUrl: String(input.baseUrl || defaultConfig.baseUrl).trim(),
-    model: String(input.model || defaultConfig.model).trim(),
-    apiBackend: input.apiBackend === 'chat_completions' ? 'chat_completions' : 'responses',
-    proxyUrl: String(input.proxyUrl || '').trim(),
-    systemPrompt: String(input.systemPrompt || defaultConfig.systemPrompt).trim()
+  const sourcePresets = Array.isArray(input.presets) && input.presets.length
+    ? input.presets.slice(0, 30)
+    : [defaultPreset];
+  const presets = sourcePresets.map((preset, index) => normalizePreset(preset, index));
+  const storedPresets = presets.map((preset) => {
+    const storedPreset = { ...preset };
+    delete storedPreset.apiKey;
+    if (preset.apiKey && safeStorage.isEncryptionAvailable()) {
+      storedPreset.encryptedApiKey = safeStorage.encryptString(preset.apiKey).toString('base64');
+    } else {
+      storedPreset.apiKey = preset.apiKey;
+    }
+    return storedPreset;
+  });
+  const activePresetId = presets.some((preset) => preset.id === input.activePresetId)
+    ? input.activePresetId
+    : presets[0].id;
+  const storedConfig = {
+    activePresetId,
+    autoFallback: input.autoFallback !== false,
+    presets: storedPresets,
+    systemPrompt: String(input.systemPrompt || defaultSystemPrompt).trim()
   };
 
-  const apiKey = String(input.apiKey || '').trim();
-  if (apiKey && safeStorage.isEncryptionAvailable()) {
-    config.encryptedApiKey = safeStorage.encryptString(apiKey).toString('base64');
-  } else {
-    config.apiKey = apiKey;
-  }
-
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
-  fs.writeFileSync(configPath(), JSON.stringify(config, null, 2), 'utf8');
-  return { ...config, apiKey };
+  fs.writeFileSync(configPath(), JSON.stringify(storedConfig, null, 2), 'utf8');
+  return { ...storedConfig, presets, activePresetId };
 }
 
 function sendToRenderer(channel, payload) {
@@ -324,8 +378,7 @@ async function stopLanShare() {
   return { ok: true };
 }
 
-async function streamChatCompletion({ imageDataUrl, prompt }) {
-  const config = readConfig();
+async function streamChatCompletion({ imageDataUrl, prompt }, config) {
   if (!config.baseUrl) throw new Error('请先填写模型 API 地址');
   if (!config.model) throw new Error('请先填写模型名称');
 
@@ -387,6 +440,7 @@ async function streamChatCompletion({ imageDataUrl, prompt }) {
       body: JSON.stringify(requestBody)
     });
   } catch (error) {
+    if (error.name === 'AbortError') throw error;
     const cause = error && error.cause && error.cause.message ? `（${error.cause.message}）` : '';
     throw new Error(`无法连接模型服务：${endpoint}${cause}。请检查网络、代理或接口地址。`);
   }
@@ -399,30 +453,43 @@ async function streamChatCompletion({ imageDataUrl, prompt }) {
   if (!response.body) {
     const json = await response.json();
     const text = apiBackend === 'responses' ? extractResponsesText(json) : extractDelta(json);
-    if (text) sendToRenderer('analysis-chunk', text);
+    if (!text) throw new Error('模型没有返回可显示的内容');
+    sendToRenderer('analysis-chunk', text);
     return;
   }
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let receivedText = false;
 
   const processEvents = (flush = false) => {
     if (flush) buffer += decoder.decode();
     const events = buffer.split(/\r?\n\r?\n/);
     buffer = events.pop() || '';
+    if (flush && buffer.trim()) {
+      events.push(buffer);
+      buffer = '';
+    }
 
     for (const event of events) {
       const dataLines = event
         .split(/\r?\n/)
         .filter((line) => line.startsWith('data:'))
         .map((line) => line.slice(5).trim());
-      if (!dataLines.length) continue;
-      const data = dataLines.join('\n');
+      const data = dataLines.length ? dataLines.join('\n') : (flush ? event.trim() : '');
+      if (!data) continue;
       if (data === '[DONE]') continue;
       try {
-        const text = extractStreamText(JSON.parse(data), apiBackend);
-        if (text) sendToRenderer('analysis-chunk', text);
+        const parsed = JSON.parse(data);
+        const streamedText = extractStreamText(parsed, apiBackend);
+        const text = streamedText || (!receivedText
+          ? (apiBackend === 'responses' ? extractResponsesText(parsed) : extractDelta(parsed))
+          : '');
+        if (text) {
+          receivedText = true;
+          sendToRenderer('analysis-chunk', text);
+        }
       } catch {
         // Ignore keep-alive or provider-specific non-JSON SSE frames.
       }
@@ -436,6 +503,53 @@ async function streamChatCompletion({ imageDataUrl, prompt }) {
     processEvents();
   }
   processEvents(true);
+  if (!receivedText) throw new Error('模型没有返回可显示的内容');
+}
+
+function buildPresetQueue(config, requestedPresetId) {
+  const selected = config.presets.find((preset) => preset.id === requestedPresetId)
+    || config.presets.find((preset) => preset.id === config.activePresetId)
+    || config.presets[0];
+  if (!config.autoFallback) return [selected];
+
+  const fallbackPresets = config.presets
+    .filter((preset) => preset.id !== selected.id && preset.enabled)
+    .sort((left, right) => left.priority - right.priority);
+  return [selected, ...fallbackPresets];
+}
+
+async function analyzeWithFallback(payload) {
+  const config = readConfig();
+  const queue = buildPresetQueue(config, payload.presetId);
+  const failures = [];
+
+  for (let index = 0; index < queue.length; index += 1) {
+    const preset = queue[index];
+    sendToRenderer('analysis-attempt', {
+      presetId: preset.id,
+      presetName: preset.name,
+      attempt: index + 1,
+      total: queue.length
+    });
+
+    try {
+      await streamChatCompletion(payload, { ...preset, systemPrompt: config.systemPrompt });
+      return { presetId: preset.id, presetName: preset.name, attempts: index + 1 };
+    } catch (error) {
+      if (error.name === 'AbortError') throw error;
+      failures.push(`${preset.name}：${error.message}`);
+      const nextPreset = queue[index + 1];
+      if (nextPreset) {
+        sendToRenderer('analysis-fallback', {
+          failedPresetName: preset.name,
+          nextPresetName: nextPreset.name,
+          error: error.message
+        });
+      }
+    }
+  }
+
+  throw new Error(failures.join('\n'));
 }
 
 function createWindow() {
@@ -477,9 +591,9 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('analyze-image', async (_event, payload) => {
     try {
-      await streamChatCompletion(payload);
-      sendToRenderer('analysis-complete');
-      return { ok: true };
+      const result = await analyzeWithFallback(payload);
+      sendToRenderer('analysis-complete', result);
+      return { ok: true, ...result };
     } catch (error) {
       if (error.name === 'AbortError') {
         sendToRenderer('analysis-stopped');
