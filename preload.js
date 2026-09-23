@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('assistantAPI', {
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
   startLanShare: () => ipcRenderer.invoke('start-lan-share'),
   stopLanShare: () => ipcRenderer.invoke('stop-lan-share'),
+  discoverLanShares: () => ipcRenderer.invoke('discover-lan-shares'),
   minimizeLanShare: () => ipcRenderer.invoke('minimize-lan-share'),
   analyzeImage: (payload) => ipcRenderer.invoke('analyze-image', payload),
   stopAnalysis: () => ipcRenderer.invoke('stop-analysis'),

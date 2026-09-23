@@ -42,10 +42,6 @@
               <img id="screenPreview" alt="屏幕截图预览" />
             </div>
 
-            <div class="quick-run-row">
-              <label for="requestPresetSelect">分析预设</label>
-              <select id="requestPresetSelect" aria-label="选择本次分析使用的模型预设"></select>
-            </div>
             <div class="action-row capture-actions">
               <button class="primary-button" id="captureAnalyzeButton">截图并分析</button>
               <button class="secondary-button" id="retryAnalyzeButton" disabled>用当前截图重试</button>
@@ -99,6 +95,13 @@
             <button class="ghost-button" id="minimizeShareButton" disabled>最小化共享端</button>
           </div>
           <div class="share-info" id="shareInfo">在题目所在电脑启动共享端，然后把地址和配对码填到另一台电脑。</div>
+          <div class="discovery-row">
+            <select id="discoveredDeviceSelect" aria-label="选择发现的共享设备">
+              <option value="">发现的共享设备</option>
+            </select>
+            <button class="ghost-button" id="discoverDevicesButton" type="button">搜索设备</button>
+          </div>
+          <div class="hint discovery-status" id="discoveryStatus" aria-live="polite"></div>
           <label>
             远程设备地址
             <input id="remoteUrlInput" type="url" placeholder="http://192.168.1.20:8765" />
@@ -118,7 +121,7 @@
           <div class="section-heading">
             <div>
               <span class="step">设置</span>
-              <h2>模型预设</h2>
+              <h2>模型设置</h2>
             </div>
             <span class="muted" id="saveStatus">本地保存</span>
           </div>
@@ -127,6 +130,10 @@
             <button class="icon-text-button" id="addPresetButton" type="button">新增</button>
             <button class="icon-text-button danger-button" id="deletePresetButton" type="button">删除</button>
           </div>
+          <label class="check-field primary-preset-field">
+            <input id="primaryPresetInput" type="radio" name="primaryPreset" />
+            <span>设为主用模型</span>
+          </label>
           <label>
             预设名称
             <input id="presetNameInput" type="text" placeholder="例如 主力模型" />
@@ -143,7 +150,7 @@
           </div>
           <label>
             API 地址
-            <input id="baseUrlInput" type="url" placeholder="https://right.ai/grok/v1" />
+            <input id="baseUrlInput" type="url" placeholder="https://api.example.com/v1" />
           </label>
           <label>
             API 协议
@@ -154,7 +161,7 @@
           </label>
           <label>
             模型名称
-            <input id="modelInput" type="text" placeholder="grok-4.5" />
+            <input id="modelInput" type="text" placeholder="输入服务端提供的模型名称" />
           </label>
           <label>
             API Key <span class="optional">可选，本地模型可留空</span>

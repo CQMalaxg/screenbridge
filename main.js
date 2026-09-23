@@ -10,6 +10,7 @@ const {
   session
 } = require('electron');
 const crypto = require('crypto');
+const dgram = require('dgram');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -18,6 +19,7 @@ const path = require('path');
 let mainWindow;
 let activeAbortController = null;
 let lanShareServer = null;
+let lanDiscoverySocket = null;
 let lanShareTimer = null;
 let lanShareToken = '';
 let lanShareFrame = null;
@@ -27,16 +29,20 @@ const defaultSystemPrompt =
   '你是一个面试练习助手。请准确阅读截图内容，先给出结论，再给出简洁、可直接使用的回答。信息不足时请明确指出。';
 
 const defaultPreset = {
-  id: 'default',
-  name: '默认模型',
-  baseUrl: 'https://right.ai/grok/v1',
-  model: 'grok-4.5',
+  id: 'model-1',
+  name: '模型 1',
+  baseUrl: '',
+  model: '',
   apiBackend: 'responses',
   apiKey: '',
   proxyUrl: '',
   enabled: true,
   priority: 1
 };
+
+const lanDiscoveryPort = 8766;
+const lanDiscoveryRequest = 'SCREENBRIDGE_DISCOVER_V1';
+const lanDiscoveryResponse = 'SCREENBRIDGE_SHARE_V1';
 
 function configPath() {
   return path.join(app.getPath('userData'), 'config.json');
@@ -87,8 +93,8 @@ function readConfig() {
     // Migrate the original single-model configuration without losing its API key.
     presets = [normalizePreset({
       ...defaultPreset,
-      baseUrl: stored.baseUrl || defaultPreset.baseUrl,
-      model: stored.model || defaultPreset.model,
+      baseUrl: stored.baseUrl || '',
+      model: stored.model || '',
       apiBackend: stored.apiBackend || defaultPreset.apiBackend,
       apiKey: decryptApiKey(stored),
       proxyUrl: stored.proxyUrl || defaultPreset.proxyUrl
@@ -304,9 +310,101 @@ function lanShareInfo() {
   return {
     port,
     token: lanShareToken,
+    discoveryAvailable: Boolean(lanDiscoverySocket),
     addresses: addressList,
     urls: addressList.map((address) => `http://${address}:${port}`)
   };
+}
+
+function startLanDiscoveryResponder() {
+  if (lanDiscoverySocket) return Promise.resolve(true);
+
+  const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+  socket.on('error', () => {});
+  socket.on('message', (message, remote) => {
+    if (message.toString() !== lanDiscoveryRequest || !lanShareServer) return;
+    const address = lanShareServer.address();
+    if (!address || typeof address === 'string') return;
+
+    const payload = JSON.stringify({
+      type: lanDiscoveryResponse,
+      name: os.hostname(),
+      port: address.port
+    });
+    socket.send(payload, remote.port, remote.address, () => {});
+  });
+
+  return new Promise((resolve, reject) => {
+    let ready = false;
+    socket.once('error', (error) => {
+      if (ready) return;
+      ready = true;
+      try {
+        socket.close();
+      } catch {}
+      reject(error);
+    });
+    socket.bind(lanDiscoveryPort, '0.0.0.0', () => {
+      ready = true;
+      lanDiscoverySocket = socket;
+      resolve(true);
+    });
+  });
+}
+
+function discoverLanShares() {
+  const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+  const devices = new Map();
+
+  return new Promise((resolve, reject) => {
+    let completed = false;
+    let timeout;
+    const finish = (error) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      try {
+        socket.close();
+      } catch {}
+      if (error) {
+        reject(new Error(`局域网设备搜索失败：${error.message}`));
+        return;
+      }
+      resolve([...devices.values()].sort((left, right) => left.name.localeCompare(right.name)));
+    };
+
+    socket.on('error', finish);
+    socket.on('message', (message, remote) => {
+      try {
+        const result = JSON.parse(message.toString());
+        if (result.type !== lanDiscoveryResponse) return;
+        const port = Number(result.port);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) return;
+        const address = remote.address;
+        const id = `${address}:${port}`;
+        devices.set(id, {
+          id,
+          name: String(result.name || address),
+          address,
+          url: `http://${address}:${port}`
+        });
+      } catch {
+        // Ignore unrelated UDP broadcasts.
+      }
+    });
+
+    timeout = setTimeout(() => finish(), 1600);
+    socket.bind(0, '0.0.0.0', () => {
+      try {
+        socket.setBroadcast(true);
+        socket.send(lanDiscoveryRequest, lanDiscoveryPort, '255.255.255.255', (error) => {
+          if (error) finish(error);
+        });
+      } catch (error) {
+        finish(error);
+      }
+    });
+  });
 }
 
 async function startLanShare() {
@@ -363,6 +461,7 @@ async function startLanShare() {
   lanShareTimer = setInterval(() => {
     captureLanFrame().catch(() => {});
   }, 400);
+  await startLanDiscoveryResponder().catch(() => false);
   return lanShareInfo();
 }
 
@@ -371,6 +470,10 @@ async function stopLanShare() {
   lanShareTimer = null;
   lanShareFrame = null;
   lanShareToken = '';
+  if (lanDiscoverySocket) {
+    await new Promise((resolve) => lanDiscoverySocket.close(() => resolve()));
+    lanDiscoverySocket = null;
+  }
   if (lanShareServer) {
     await new Promise((resolve) => lanShareServer.close(() => resolve()));
     lanShareServer = null;
@@ -422,15 +525,14 @@ async function streamChatCompletion({ imageDataUrl, prompt }, config) {
         ]
       };
 
-  await session.defaultSession.setProxy(
-    config.proxyUrl ? { proxyRules: config.proxyUrl } : { mode: 'system' }
-  );
-
   const controller = new AbortController();
   activeAbortController = controller;
 
   let response;
   try {
+    await session.defaultSession.setProxy(
+      config.proxyUrl ? { proxyRules: config.proxyUrl } : { mode: 'system' }
+    );
     // Electron's network stack can use the desktop app's proxy/session settings;
     // Node's standalone fetch often cannot reach services behind a system proxy.
     response = await net.fetch(endpoint, {
@@ -441,13 +543,17 @@ async function streamChatCompletion({ imageDataUrl, prompt }, config) {
     });
   } catch (error) {
     if (error.name === 'AbortError') throw error;
-    const cause = error && error.cause && error.cause.message ? `（${error.cause.message}）` : '';
-    throw new Error(`无法连接模型服务：${endpoint}${cause}。请检查网络、代理或接口地址。`);
+    const cause = error && error.cause && error.cause.message
+      ? error.cause.message
+      : (error.message || '网络连接失败');
+    throw new Error(`无法连接模型服务：${endpoint}\n原因：${cause}\n请检查 API 地址、网络连接和代理设置。`);
   }
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`模型请求失败（${response.status}）：${errorText.slice(0, 500)}`);
+    throw new Error(
+      `模型请求失败（HTTP ${response.status} ${response.statusText}）\n${errorText.slice(0, 500) || '服务端未提供错误详情'}\n请检查 API 协议、API Key 和模型名称。`
+    );
   }
 
   if (!response.body) {
@@ -577,6 +683,7 @@ app.whenReady().then(() => {
   ipcMain.handle('capture-screen', () => capturePrimaryScreen());
   ipcMain.handle('start-lan-share', () => startLanShare());
   ipcMain.handle('stop-lan-share', () => stopLanShare());
+  ipcMain.handle('discover-lan-shares', () => discoverLanShares());
   ipcMain.handle('minimize-lan-share', () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
     return { ok: true };

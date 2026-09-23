@@ -70,14 +70,17 @@ textarea:focus, input:focus, select:focus { border-color: #938bf7; box-shadow: 0
 .hint, .security-note { color: #9aa1b1; font-size: 11px; line-height: 1.55; }
 .hint { margin-top: 8px; }
 .settings-card { padding-bottom: 18px; }
-.quick-run-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 16px; }
-.quick-run-row label { margin: 0; white-space: nowrap; }
 .preset-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; }
+.discovery-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin: 12px 0 0; }
+.discovery-row select, .discovery-row button { margin: 0; }
+.discovery-status { min-height: 17px; margin: 5px 0 0; }
+.discovery-status.is-error { color: #d95e5e; }
 .settings-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 1fr); gap: 14px; align-items: end; }
 .settings-row label { margin-bottom: 0; }
 .check-field { display: flex; align-items: center; gap: 8px; min-height: 40px; margin: 13px 0; color: #596278; }
 .check-field input { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: #6258e9; }
 .auto-fallback-field { min-height: auto; }
+.primary-preset-field { margin-top: 10px; }
 .lan-card { padding-bottom: 18px; }
 .lan-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .lan-actions .secondary-button { width: auto; margin-top: 0; }

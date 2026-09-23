@@ -16,11 +16,11 @@ const elements = {
   captureStatus: document.getElementById('captureStatus'),
   shortcutStatus: document.getElementById('shortcutStatus'),
   saveStatus: document.getElementById('saveStatus'),
-  requestPresetSelect: document.getElementById('requestPresetSelect'),
   presetSelect: document.getElementById('presetSelect'),
   addPresetButton: document.getElementById('addPresetButton'),
   deletePresetButton: document.getElementById('deletePresetButton'),
   presetNameInput: document.getElementById('presetNameInput'),
+  primaryPresetInput: document.getElementById('primaryPresetInput'),
   priorityInput: document.getElementById('priorityInput'),
   presetEnabledInput: document.getElementById('presetEnabledInput'),
   autoFallbackInput: document.getElementById('autoFallbackInput'),
@@ -35,6 +35,9 @@ const elements = {
   shareInfo: document.getElementById('shareInfo'),
   remoteUrlInput: document.getElementById('remoteUrlInput'),
   remoteTokenInput: document.getElementById('remoteTokenInput'),
+  discoveredDeviceSelect: document.getElementById('discoveredDeviceSelect'),
+  discoverDevicesButton: document.getElementById('discoverDevicesButton'),
+  discoveryStatus: document.getElementById('discoveryStatus'),
   connectRemoteButton: document.getElementById('connectRemoteButton'),
   disconnectRemoteButton: document.getElementById('disconnectRemoteButton')
 };
@@ -51,6 +54,7 @@ let remotePollTimer = null;
 let remotePolling = false;
 let appConfig = null;
 let editingPresetId = '';
+let discoveredDevices = [];
 
 function escapeHtml(value) {
   return String(value)
@@ -197,6 +201,11 @@ function setLanStatus(text, isError = false) {
   elements.lanStatus.style.color = isError ? '#d95e5e' : '';
 }
 
+function setDiscoveryStatus(text, isError = false) {
+  elements.discoveryStatus.textContent = text;
+  elements.discoveryStatus.classList.toggle('is-error', isError);
+}
+
 function activePreset() {
   return appConfig && appConfig.presets.find((preset) => preset.id === editingPresetId);
 }
@@ -222,19 +231,16 @@ function renderPresetOptions() {
     .map((preset) => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)} · P${preset.priority}</option>`)
     .join('');
   elements.presetSelect.innerHTML = options;
-  elements.requestPresetSelect.innerHTML = options;
-  elements.presetSelect.value = appConfig.activePresetId;
-  elements.requestPresetSelect.value = appConfig.activePresetId;
+  elements.presetSelect.value = editingPresetId || appConfig.activePresetId;
   elements.deletePresetButton.disabled = appConfig.presets.length <= 1;
 }
 
 function renderPresetForm(presetId) {
   const preset = appConfig.presets.find((item) => item.id === presetId) || appConfig.presets[0];
   editingPresetId = preset.id;
-  appConfig.activePresetId = preset.id;
   elements.presetSelect.value = preset.id;
-  elements.requestPresetSelect.value = preset.id;
   elements.presetNameInput.value = preset.name || '';
+  elements.primaryPresetInput.checked = appConfig.activePresetId === preset.id;
   elements.priorityInput.value = preset.priority || 1;
   elements.presetEnabledInput.checked = preset.enabled !== false;
   elements.baseUrlInput.value = preset.baseUrl || '';
@@ -256,8 +262,11 @@ function loadConfig(config) {
   if (!appConfig.presets.some((preset) => preset.id === appConfig.activePresetId)) {
     appConfig.activePresetId = appConfig.presets[0].id;
   }
+  const selectedPresetId = appConfig.presets.some((preset) => preset.id === editingPresetId)
+    ? editingPresetId
+    : appConfig.activePresetId;
   renderPresetOptions();
-  renderPresetForm(appConfig.activePresetId);
+  renderPresetForm(selectedPresetId);
 }
 
 function createPresetId() {
@@ -280,7 +289,6 @@ function addPreset() {
     priority: nextPriority
   };
   appConfig.presets.push(preset);
-  appConfig.activePresetId = preset.id;
   renderPresetOptions();
   renderPresetForm(preset.id);
   elements.presetNameInput.focus();
@@ -290,9 +298,10 @@ function addPreset() {
 function deletePreset() {
   if (appConfig.presets.length <= 1) return;
   const index = appConfig.presets.findIndex((preset) => preset.id === editingPresetId);
+  const wasPrimary = appConfig.activePresetId === editingPresetId;
   appConfig.presets.splice(index, 1);
   const nextPreset = appConfig.presets[Math.min(index, appConfig.presets.length - 1)];
-  appConfig.activePresetId = nextPreset.id;
+  if (wasPrimary) appConfig.activePresetId = nextPreset.id;
   renderPresetOptions();
   renderPresetForm(nextPreset.id);
 }
@@ -383,10 +392,24 @@ function blobToDataUrl(blob) {
 async function fetchRemoteFrameData() {
   if (!remoteBaseUrl || !remoteToken) throw new Error('请先连接远程屏幕');
   const endpoint = `${remoteBaseUrl}/frame?token=${encodeURIComponent(remoteToken)}&t=${Date.now()}`;
-  const response = await fetch(endpoint, { cache: 'no-store' });
+  let response;
+  try {
+    response = await fetch(endpoint, { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+  } catch (error) {
+    const reason = error.name === 'TimeoutError' ? '连接超时' : (error.message || '网络不可达');
+    throw new Error(
+      `无法连接共享端 ${remoteBaseUrl}（${reason}）。请确认共享端仍在运行、两台设备处于同一局域网，并允许防火墙通过 TCP 8765。`
+    );
+  }
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`远程屏幕请求失败（${response.status}）：${message.slice(0, 160)}`);
+    const body = await response.text();
+    let message = body;
+    try {
+      const parsed = JSON.parse(body);
+      message = String(parsed.error || body);
+    } catch {}
+    if (response.status === 401) throw new Error('配对码错误，请核对共享端显示的配对码。');
+    throw new Error(`共享端返回 HTTP ${response.status}：${message.slice(0, 160) || '未提供错误详情'}`);
   }
   return blobToDataUrl(await response.blob());
 }
@@ -422,12 +445,46 @@ async function startShare() {
   try {
     const info = await api.startLanShare();
     const urls = info.urls.length ? info.urls.join('\n') : `端口：${info.port}`;
-    elements.shareInfo.textContent = `共享地址：\n${urls}\n配对码：${info.token}`;
+    const discoveryMessage = info.discoveryAvailable
+      ? ''
+      : '\n局域网设备搜索暂不可用，请在另一台设备手动填写地址。';
+    elements.shareInfo.textContent = `共享地址：\n${urls}\n配对码：${info.token}${discoveryMessage}`;
     elements.minimizeShareButton.disabled = false;
-    setLanStatus('共享端运行中');
+    setLanStatus(info.discoveryAvailable ? '共享端运行中' : '共享端运行中，设备搜索不可用', !info.discoveryAvailable);
   } catch (error) {
     setLanStatus(error.message || '共享端启动失败', true);
   }
+}
+
+async function searchLanDevices() {
+  elements.discoverDevicesButton.disabled = true;
+  elements.discoveredDeviceSelect.disabled = true;
+  setDiscoveryStatus('正在搜索局域网共享设备…');
+  try {
+    discoveredDevices = await api.discoverLanShares();
+    elements.discoveredDeviceSelect.replaceChildren(new Option('发现的共享设备', ''));
+    for (const device of discoveredDevices) {
+      elements.discoveredDeviceSelect.add(new Option(`${device.name} · ${device.address}`, device.id));
+    }
+    if (discoveredDevices.length) {
+      setDiscoveryStatus(`发现 ${discoveredDevices.length} 台共享设备`);
+    } else {
+      setDiscoveryStatus('未发现设备，请确认共享端正在运行。');
+    }
+  } catch (error) {
+    discoveredDevices = [];
+    elements.discoveredDeviceSelect.replaceChildren(new Option('发现的共享设备', ''));
+    setDiscoveryStatus(error.message || '局域网设备搜索失败', true);
+  } finally {
+    elements.discoverDevicesButton.disabled = false;
+    elements.discoveredDeviceSelect.disabled = false;
+  }
+}
+
+function selectDiscoveredDevice() {
+  const device = discoveredDevices.find((item) => item.id === elements.discoveredDeviceSelect.value);
+  if (!device) return;
+  elements.remoteUrlInput.value = device.url;
 }
 
 async function minimizeShare() {
@@ -486,7 +543,6 @@ async function saveConfig(showStatus = true) {
   if (!appConfig) throw new Error('模型预设尚未加载完成');
   commitPresetForm();
   appConfig.autoFallback = elements.autoFallbackInput.checked;
-  appConfig.activePresetId = editingPresetId;
   const config = await api.saveConfig(appConfig);
   loadConfig(config);
   if (showStatus) {
@@ -522,6 +578,7 @@ async function captureAndAnalyze() {
   } catch (error) {
     setGenerating(false);
     setCaptureStatus('分析失败', true);
+    if (remoteConnected) setLanStatus(error.message || '远程屏幕连接失败', true);
     setAnswer(`分析失败：\n${error.message || error}`);
   }
 }
@@ -553,6 +610,8 @@ elements.startShareButton.addEventListener('click', startShare);
 elements.minimizeShareButton.addEventListener('click', minimizeShare);
 elements.connectRemoteButton.addEventListener('click', connectRemote);
 elements.disconnectRemoteButton.addEventListener('click', disconnectRemote);
+elements.discoverDevicesButton.addEventListener('click', searchLanDevices);
+elements.discoveredDeviceSelect.addEventListener('change', selectDiscoveredDevice);
 elements.stopButton.addEventListener('click', async () => {
   await api.stopAnalysis();
 });
@@ -561,16 +620,12 @@ elements.deletePresetButton.addEventListener('click', deletePreset);
 elements.presetSelect.addEventListener('change', (event) => {
   commitPresetForm();
   appConfig.autoFallback = elements.autoFallbackInput.checked;
-  appConfig.activePresetId = event.target.value;
-  renderPresetOptions();
-  renderPresetForm(appConfig.activePresetId);
+  renderPresetForm(event.target.value);
 });
-elements.requestPresetSelect.addEventListener('change', (event) => {
-  commitPresetForm();
-  appConfig.autoFallback = elements.autoFallbackInput.checked;
-  appConfig.activePresetId = event.target.value;
-  renderPresetOptions();
-  renderPresetForm(appConfig.activePresetId);
+elements.primaryPresetInput.addEventListener('change', () => {
+  if (!elements.primaryPresetInput.checked) return;
+  appConfig.activePresetId = editingPresetId;
+  elements.saveStatus.textContent = '未保存';
 });
 elements.saveButton.addEventListener('click', () => {
   saveConfig(true).catch((error) => {
@@ -611,8 +666,9 @@ api.onAnalysisStopped(() => {
 });
 api.onAnalysisError((message) => {
   setGenerating(false);
-  setCaptureStatus('分析失败', true);
-  setAnswer(`分析失败：\n${message}`);
+  const detail = String(message || '未知错误');
+  setCaptureStatus(detail.startsWith('无法连接模型服务') ? '无法连接模型服务' : '模型请求失败', true);
+  setAnswer(`分析失败：\n${detail}`);
 });
 
 api.getConfig()
