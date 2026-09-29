@@ -14,12 +14,19 @@
     <video id="screenMonitor" autoplay muted playsinline aria-hidden="true"></video>
     <main class="shell">
       <header class="topbar">
-        <div>
+        <div class="brand-block">
           <div class="eyebrow">LOCAL VISION ASSISTANT</div>
           <h1>屏桥 ScreenBridge</h1>
-          <p class="subtitle">截图后交给视觉模型，快速整理思路与回答。</p>
+          <p class="subtitle">截图交给视觉模型，再围绕回答继续多轮追问。</p>
         </div>
-        <div class="shortcut-pill" id="shortcutStatus">屏幕监听中</div>
+        <nav class="topnav" aria-label="顶部导航">
+          <div class="model-chips">
+            <span class="chip" id="visionChip">视觉模型：未配置</span>
+            <span class="chip" id="chatChip">对话模型：未配置</span>
+          </div>
+          <div class="shortcut-pill" id="shortcutStatus">屏幕监听中</div>
+          <button class="nav-button" id="settingsButton" type="button">设置</button>
+        </nav>
       </header>
 
       <section class="workspace">
@@ -58,9 +65,6 @@
             </div>
             <textarea id="promptInput" rows="5">请阅读截图中的题目，先给出结论，再给出简洁、可直接使用的回答。若是编程题，请说明思路、复杂度和关键代码。</textarea>
             <div class="hint">建议只截取题目相关区域，图片越小，响应通常越快。</div>
-            <div class="action-row">
-              <button class="ghost-button" id="stopButton" disabled>停止生成</button>
-            </div>
           </section>
         </div>
 
@@ -69,13 +73,34 @@
             <div class="section-heading">
               <div>
                 <span class="step">03</span>
-                <h2>模型回答</h2>
+                <h2>回答与多轮追问</h2>
               </div>
-              <button class="text-button" id="copyButton">复制</button>
+              <div class="heading-tools">
+                <button class="text-button" id="copyButton">复制</button>
+                <button class="text-button" id="clearChatButton">清空对话</button>
+              </div>
             </div>
-            <div class="answer-box" id="answerBox">
-              <div class="answer-placeholder" id="answerPlaceholder">回答会显示在这里</div>
-              <div id="answerText"></div>
+
+            <div class="thread" id="thread">
+              <div class="thread-empty" id="threadEmpty">截图分析后，回答会显示在这里；随后可以针对回答继续追问。</div>
+            </div>
+
+            <div class="composer">
+              <textarea
+                id="chatInput"
+                rows="2"
+                placeholder="针对上面的回答继续追问…（Ctrl + Enter 发送）"
+                disabled
+              ></textarea>
+              <div class="composer-row">
+                <label class="check-field composer-check">
+                  <input id="attachImageInput" type="checkbox" />
+                  <span>附带当前截图</span>
+                </label>
+                <button class="primary-button" id="sendChatButton" disabled>发送追问</button>
+                <button class="ghost-button" id="stopButton" disabled>停止生成</button>
+              </div>
+              <div class="hint" id="chatHint">完成一次截图分析后即可开始追问，追问由“对话模型”处理。</div>
             </div>
           </section>
         </div>
@@ -116,74 +141,109 @@
           </div>
           <div class="hint">两台电脑需要在同一个局域网。共享端启动后建议最小化窗口，避免把共享端 App 自己录进去。</div>
         </section>
+      </section>
 
-        <section class="card settings-card">
-          <div class="section-heading">
-            <div>
-              <span class="step">设置</span>
-              <h2>模型设置</h2>
-            </div>
-            <span class="muted" id="saveStatus">本地保存</span>
+      <footer class="footer-note">
+        当前版本支持单机截图、局域网共享端与助手端，并支持围绕回答进行多轮对话。
+      </footer>
+    </main>
+
+    <div class="modal-backdrop" id="settingsModal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="modal-head">
+          <div>
+            <span class="step">设置</span>
+            <h2 id="settingsTitle">模型设置</h2>
           </div>
+          <button class="ghost-button" id="closeSettingsButton" type="button">关闭</button>
+        </div>
+
+        <div class="modal-tabs" id="settingsTabs">
+          <button class="tab-button is-active" type="button" data-group="vision">视觉模型</button>
+          <button class="tab-button" type="button" data-group="chat">对话模型</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="hint tab-hint" id="tabHint"></div>
+
           <div class="preset-toolbar">
-            <select id="presetSelect" aria-label="编辑模型预设"></select>
-            <button class="icon-text-button" id="addPresetButton" type="button">新增</button>
-            <button class="icon-text-button danger-button" id="deletePresetButton" type="button">删除</button>
+            <select id="stPresetSelect" aria-label="编辑模型预设"></select>
+            <button class="icon-text-button" id="stAddPresetButton" type="button">新增</button>
+            <button class="icon-text-button danger-button" id="stDeletePresetButton" type="button">删除</button>
           </div>
           <label class="check-field primary-preset-field">
-            <input id="primaryPresetInput" type="radio" name="primaryPreset" />
-            <span>设为主用模型</span>
+            <input id="stPrimaryPresetInput" type="radio" name="primaryPreset" />
+            <span id="stPrimaryPresetLabel">设为主用模型</span>
           </label>
           <label>
             预设名称
-            <input id="presetNameInput" type="text" placeholder="例如 主力模型" />
+            <input id="stPresetNameInput" type="text" placeholder="例如 主力模型" />
           </label>
           <div class="settings-row">
             <label>
               请求优先级
-              <input id="priorityInput" type="number" min="1" max="999" step="1" />
+              <input id="stPriorityInput" type="number" min="1" max="999" step="1" />
             </label>
             <label class="check-field">
-              <input id="presetEnabledInput" type="checkbox" />
+              <input id="stPresetEnabledInput" type="checkbox" />
               <span>参与自动切换</span>
             </label>
           </div>
           <label>
             API 地址
-            <input id="baseUrlInput" type="url" placeholder="https://api.example.com/v1" />
+            <input id="stBaseUrlInput" type="url" placeholder="https://api.example.com/v1" />
           </label>
           <label>
             API 协议
-            <select id="apiBackendInput">
+            <select id="stApiBackendInput">
               <option value="responses">Responses API</option>
               <option value="chat_completions">Chat Completions</option>
             </select>
           </label>
           <label>
             模型名称
-            <input id="modelInput" type="text" placeholder="输入服务端提供的模型名称" />
+            <input id="stModelInput" type="text" placeholder="输入服务端提供的模型名称" />
           </label>
           <label>
             API Key <span class="optional">可选，本地模型可留空</span>
-            <input id="apiKeyInput" type="password" placeholder="sk-..." autocomplete="off" />
+            <input id="stApiKeyInput" type="password" placeholder="sk-..." autocomplete="off" />
           </label>
           <label>
             HTTP 代理 <span class="optional">可选，例如 http://127.0.0.1:7897</span>
-            <input id="proxyUrlInput" type="text" placeholder="留空表示不使用代理" />
+            <input id="stProxyUrlInput" type="text" placeholder="留空表示不使用代理" />
           </label>
-          <label class="check-field auto-fallback-field">
-            <input id="autoFallbackInput" type="checkbox" />
-            <span>请求失败时按优先级自动尝试其他已启用预设</span>
-          </label>
-          <button class="secondary-button" id="saveButton">保存全部预设</button>
-          <div class="security-note">API Key 随各预设保存在本机。截图默认只在内存中处理，不写入本地文件。</div>
-        </section>
-      </section>
 
-      <footer class="footer-note">
-        当前版本支持单机截图，也支持局域网共享端与助手端。
-      </footer>
-    </main>
+          <div class="prompt-field" id="stVisionPromptField">
+            <label>
+              视觉模型系统提示词
+              <textarea id="stSystemPromptInput" rows="3"></textarea>
+            </label>
+          </div>
+          <div class="prompt-field" id="stChatPromptField" hidden>
+            <label>
+              对话模型系统提示词
+              <textarea id="stChatSystemPromptInput" rows="3"></textarea>
+            </label>
+            <div class="hint">追问时，截图与上一轮回答会作为上下文一起发送。</div>
+          </div>
+
+          <label class="check-field auto-fallback-field">
+            <input id="stAutoFallbackInput" type="checkbox" />
+            <span>请求失败时按优先级自动尝试同组其他已启用预设</span>
+          </label>
+          <div class="security-note">API Key 随各预设保存在本机。截图默认只在内存中处理，不写入本地文件。</div>
+        </div>
+
+        <div class="modal-foot">
+          <span class="muted" id="saveStatus">本地保存</span>
+          <div class="modal-foot-actions">
+            <button class="ghost-button" id="cancelSettingsButton" type="button">取消</button>
+            <button class="primary-button" id="saveButton" type="button">保存设置</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <script src="./renderer.js"></script>
   </body>
 </html>

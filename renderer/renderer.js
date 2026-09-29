@@ -6,29 +6,47 @@ const elements = {
   clearButton: document.getElementById('clearButton'),
   stopButton: document.getElementById('stopButton'),
   copyButton: document.getElementById('copyButton'),
-  saveButton: document.getElementById('saveButton'),
+  clearChatButton: document.getElementById('clearChatButton'),
   screenMonitor: document.getElementById('screenMonitor'),
   screenPreview: document.getElementById('screenPreview'),
   previewWrap: document.getElementById('previewWrap'),
   promptInput: document.getElementById('promptInput'),
-  answerPlaceholder: document.getElementById('answerPlaceholder'),
-  answerText: document.getElementById('answerText'),
   captureStatus: document.getElementById('captureStatus'),
   shortcutStatus: document.getElementById('shortcutStatus'),
+  thread: document.getElementById('thread'),
+  threadEmpty: document.getElementById('threadEmpty'),
+  chatInput: document.getElementById('chatInput'),
+  chatHint: document.getElementById('chatHint'),
+  sendChatButton: document.getElementById('sendChatButton'),
+  attachImageInput: document.getElementById('attachImageInput'),
+  settingsButton: document.getElementById('settingsButton'),
+  visionChip: document.getElementById('visionChip'),
+  chatChip: document.getElementById('chatChip'),
+  settingsModal: document.getElementById('settingsModal'),
+  settingsTabs: document.getElementById('settingsTabs'),
+  closeSettingsButton: document.getElementById('closeSettingsButton'),
+  cancelSettingsButton: document.getElementById('cancelSettingsButton'),
+  tabHint: document.getElementById('tabHint'),
+  saveButton: document.getElementById('saveButton'),
   saveStatus: document.getElementById('saveStatus'),
-  presetSelect: document.getElementById('presetSelect'),
-  addPresetButton: document.getElementById('addPresetButton'),
-  deletePresetButton: document.getElementById('deletePresetButton'),
-  presetNameInput: document.getElementById('presetNameInput'),
-  primaryPresetInput: document.getElementById('primaryPresetInput'),
-  priorityInput: document.getElementById('priorityInput'),
-  presetEnabledInput: document.getElementById('presetEnabledInput'),
-  autoFallbackInput: document.getElementById('autoFallbackInput'),
-  baseUrlInput: document.getElementById('baseUrlInput'),
-  apiBackendInput: document.getElementById('apiBackendInput'),
-  modelInput: document.getElementById('modelInput'),
-  apiKeyInput: document.getElementById('apiKeyInput'),
-  proxyUrlInput: document.getElementById('proxyUrlInput'),
+  stPresetSelect: document.getElementById('stPresetSelect'),
+  stAddPresetButton: document.getElementById('stAddPresetButton'),
+  stDeletePresetButton: document.getElementById('stDeletePresetButton'),
+  stPresetNameInput: document.getElementById('stPresetNameInput'),
+  stPrimaryPresetInput: document.getElementById('stPrimaryPresetInput'),
+  stPrimaryPresetLabel: document.getElementById('stPrimaryPresetLabel'),
+  stPriorityInput: document.getElementById('stPriorityInput'),
+  stPresetEnabledInput: document.getElementById('stPresetEnabledInput'),
+  stAutoFallbackInput: document.getElementById('stAutoFallbackInput'),
+  stBaseUrlInput: document.getElementById('stBaseUrlInput'),
+  stApiBackendInput: document.getElementById('stApiBackendInput'),
+  stModelInput: document.getElementById('stModelInput'),
+  stApiKeyInput: document.getElementById('stApiKeyInput'),
+  stProxyUrlInput: document.getElementById('stProxyUrlInput'),
+  stSystemPromptInput: document.getElementById('stSystemPromptInput'),
+  stChatSystemPromptInput: document.getElementById('stChatSystemPromptInput'),
+  stVisionPromptField: document.getElementById('stVisionPromptField'),
+  stChatPromptField: document.getElementById('stChatPromptField'),
   startShareButton: document.getElementById('startShareButton'),
   minimizeShareButton: document.getElementById('minimizeShareButton'),
   lanStatus: document.getElementById('lanStatus'),
@@ -42,19 +60,29 @@ const elements = {
   disconnectRemoteButton: document.getElementById('disconnectRemoteButton')
 };
 
+const groupLabels = {
+  vision: { name: '视觉模型', hint: '用于读取截图并给出第一版回答。要求模型支持图片输入。' },
+  chat: { name: '对话模型', hint: '用于针对已给出的回答继续多轮追问。默认只发送文本上下文，可勾选附带截图。' }
+};
+
 let currentImageDataUrl = '';
-let answerMarkdown = '';
 let screenStream = null;
 let monitorStarted = false;
 let isGenerating = false;
+let generatingKind = '';
 let remoteConnected = false;
 let remoteBaseUrl = '';
 let remoteToken = '';
 let remotePollTimer = null;
 let remotePolling = false;
 let appConfig = null;
+let settingsConfig = null;
+let settingsGroup = 'vision';
 let editingPresetId = '';
 let discoveredDevices = [];
+let thread = [];
+let messageNodes = [];
+let streamingIndex = -1;
 
 function escapeHtml(value) {
   return String(value)
@@ -183,19 +211,6 @@ function setCaptureStatus(text, isError = false) {
   elements.captureStatus.style.color = isError ? '#d95e5e' : '';
 }
 
-function setAnswer(text) {
-  answerMarkdown = text || '';
-  elements.answerText.innerHTML = answerMarkdown ? renderMarkdown(answerMarkdown) : '';
-  elements.answerPlaceholder.style.display = answerMarkdown ? 'none' : 'block';
-}
-
-function setGenerating(value) {
-  isGenerating = value;
-  elements.captureAnalyzeButton.disabled = value;
-  elements.retryAnalyzeButton.disabled = value || !currentImageDataUrl;
-  elements.stopButton.disabled = !value;
-}
-
 function setLanStatus(text, isError = false) {
   elements.lanStatus.textContent = text;
   elements.lanStatus.style.color = isError ? '#d95e5e' : '';
@@ -206,67 +221,277 @@ function setDiscoveryStatus(text, isError = false) {
   elements.discoveryStatus.classList.toggle('is-error', isError);
 }
 
-function activePreset() {
-  return appConfig && appConfig.presets.find((preset) => preset.id === editingPresetId);
+/* ---------- conversation thread ---------- */
+
+function createMessageNode(message) {
+  const wrap = document.createElement('div');
+  wrap.className = `message message-${message.role}`;
+  if (message.error) wrap.classList.add('is-error');
+  if (message.streaming) wrap.classList.add('is-streaming');
+
+  const head = document.createElement('div');
+  head.className = 'message-head';
+  const role = document.createElement('span');
+  role.className = 'message-role';
+  role.textContent = message.role === 'user' ? '我' : (message.model || '模型');
+  const meta = document.createElement('span');
+  meta.className = 'message-meta';
+  meta.textContent = message.meta || '';
+  head.append(role, meta);
+
+  const body = document.createElement('div');
+  body.className = 'message-body';
+  body.innerHTML = message.content ? renderMarkdown(message.content) : '';
+
+  wrap.append(head, body);
+  return wrap;
+}
+
+function updateMessageNode(index) {
+  const node = messageNodes[index];
+  const message = thread[index];
+  if (!node || !message) return;
+
+  node.classList.toggle('is-error', Boolean(message.error));
+  node.classList.toggle('is-streaming', Boolean(message.streaming));
+  const role = node.querySelector('.message-role');
+  if (role) role.textContent = message.role === 'user' ? '我' : (message.model || '模型');
+  const meta = node.querySelector('.message-meta');
+  if (meta) meta.textContent = message.meta || '';
+  const body = node.querySelector('.message-body');
+  if (body) body.innerHTML = message.content ? renderMarkdown(message.content) : '';
+}
+
+function pushMessage(message) {
+  thread.push(message);
+  const node = createMessageNode(message);
+  messageNodes[thread.length - 1] = node;
+  elements.threadEmpty.style.display = 'none';
+  elements.thread.appendChild(node);
+  scrollThreadToBottom();
+  return thread.length - 1;
+}
+
+function renderThread() {
+  messageNodes = [];
+  elements.thread.replaceChildren(elements.threadEmpty);
+  elements.threadEmpty.style.display = thread.length ? 'none' : 'block';
+  thread.forEach((message, index) => {
+    const node = createMessageNode(message);
+    messageNodes[index] = node;
+    elements.thread.appendChild(node);
+  });
+  scrollThreadToBottom();
+}
+
+function scrollThreadToBottom() {
+  elements.thread.scrollTop = elements.thread.scrollHeight;
+}
+
+function hasAnswer() {
+  return thread.some((message) => message.role === 'assistant' && !message.error && message.content.trim());
+}
+
+function threadAsText() {
+  return thread
+    .filter((message) => message.content && message.content.trim())
+    .map((message) => `${message.role === 'user' ? '我' : (message.model || '模型')}：${message.content}`)
+    .join('\n\n');
+}
+
+function buildChatHistory() {
+  return thread
+    .filter((message) => (message.role === 'user' || message.role === 'assistant') && !message.error && message.content.trim())
+    .map((message) => ({ role: message.role, content: message.content.trim() }));
+}
+
+function setGenerating(value, kind = '') {
+  isGenerating = value;
+  generatingKind = value ? kind : '';
+  elements.captureAnalyzeButton.disabled = value;
+  elements.retryAnalyzeButton.disabled = value || !currentImageDataUrl;
+  elements.stopButton.disabled = !value;
+  updateComposerState();
+}
+
+function updateComposerState() {
+  const ready = hasAnswer() && !isGenerating;
+  elements.chatInput.disabled = !ready;
+  elements.sendChatButton.disabled = !ready;
+  elements.attachImageInput.disabled = !ready || !currentImageDataUrl;
+  if (!isGenerating) {
+    elements.chatHint.textContent = hasAnswer()
+      ? '追问由“对话模型”处理，会带上本轮对话上下文。'
+      : '完成一次截图分析后即可开始追问，追问由“对话模型”处理。';
+  }
+}
+
+function finishStreaming(index, details, prefix) {
+  const message = thread[index];
+  if (!message) return;
+  message.streaming = false;
+  message.model = (details && details.presetName) || message.model || prefix;
+  const suffix = details && details.attempts > 1 ? ` · 已切换到 ${details.presetName}` : '';
+  message.meta = `${prefix}${suffix}`;
+  updateMessageNode(index);
+  streamingIndex = -1;
+  setGenerating(false);
+  updateComposerState();
+}
+
+function failStreaming(index, message, prefix) {
+  const target = thread[index];
+  if (!target) return;
+  target.streaming = false;
+  target.error = true;
+  target.model = prefix;
+  target.meta = '请求失败';
+  target.content = message;
+  updateMessageNode(index);
+  streamingIndex = -1;
+  setGenerating(false);
+  updateComposerState();
+}
+
+/* ---------- config & settings modal ---------- */
+
+function normalizeConfig(config) {
+  const build = (group, kind) => {
+    const presets = Array.isArray(group && group.presets) ? group.presets.map((preset) => ({ ...preset })) : [];
+    if (!presets.length) throw new Error(`${groupLabels[kind].name}预设尚未初始化`);
+    const activePresetId = presets.some((preset) => preset.id === group.activePresetId)
+      ? group.activePresetId
+      : presets[0].id;
+    return { activePresetId, presets };
+  };
+  return {
+    version: 2,
+    autoFallback: config.autoFallback !== false,
+    systemPrompt: config.systemPrompt || '',
+    chatSystemPrompt: config.chatSystemPrompt || '',
+    vision: build(config.vision, 'vision'),
+    chat: build(config.chat, 'chat')
+  };
+}
+
+function cloneConfig(config) {
+  return {
+    version: 2,
+    autoFallback: config.autoFallback !== false,
+    systemPrompt: config.systemPrompt || '',
+    chatSystemPrompt: config.chatSystemPrompt || '',
+    vision: {
+      activePresetId: config.vision.activePresetId,
+      presets: config.vision.presets.map((preset) => ({ ...preset }))
+    },
+    chat: {
+      activePresetId: config.chat.activePresetId,
+      presets: config.chat.presets.map((preset) => ({ ...preset }))
+    }
+  };
+}
+
+function updateModelChips() {
+  const describe = (group, label) => {
+    const preset = group.presets.find((item) => item.id === group.activePresetId) || group.presets[0];
+    if (!preset || !preset.model) return `${label}：未配置`;
+    return `${label}：${preset.name} · ${preset.model}`;
+  };
+  elements.visionChip.textContent = describe(appConfig.vision, '视觉');
+  elements.chatChip.textContent = describe(appConfig.chat, '对话');
+  elements.visionChip.classList.toggle('is-missing', !appConfig.vision.presets.some((item) => item.id === appConfig.vision.activePresetId && item.model));
+  elements.chatChip.classList.toggle('is-missing', !appConfig.chat.presets.some((item) => item.id === appConfig.chat.activePresetId && item.model));
+}
+
+function loadConfig(config) {
+  appConfig = normalizeConfig(config);
+  updateModelChips();
+  updateComposerState();
+}
+
+function settingsGroupData() {
+  return settingsConfig[settingsGroup];
+}
+
+function editingPreset() {
+  return settingsGroupData().presets.find((preset) => preset.id === editingPresetId);
 }
 
 function commitPresetForm() {
-  const preset = activePreset();
+  const preset = editingPreset();
   if (!preset) return;
-  const priority = Number.parseInt(elements.priorityInput.value, 10);
+  const priority = Number.parseInt(elements.stPriorityInput.value, 10);
   Object.assign(preset, {
-    name: elements.presetNameInput.value.trim() || '未命名预设',
+    name: elements.stPresetNameInput.value.trim() || '未命名预设',
     priority: Number.isFinite(priority) && priority > 0 ? priority : 1,
-    enabled: elements.presetEnabledInput.checked,
-    baseUrl: elements.baseUrlInput.value.trim(),
-    apiBackend: elements.apiBackendInput.value,
-    model: elements.modelInput.value.trim(),
-    apiKey: elements.apiKeyInput.value.trim(),
-    proxyUrl: elements.proxyUrlInput.value.trim()
+    enabled: elements.stPresetEnabledInput.checked,
+    baseUrl: elements.stBaseUrlInput.value.trim(),
+    apiBackend: elements.stApiBackendInput.value,
+    model: elements.stModelInput.value.trim(),
+    apiKey: elements.stApiKeyInput.value.trim(),
+    proxyUrl: elements.stProxyUrlInput.value.trim()
   });
 }
 
 function renderPresetOptions() {
-  const options = appConfig.presets
+  const group = settingsGroupData();
+  elements.stPresetSelect.innerHTML = group.presets
     .map((preset) => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)} · P${preset.priority}</option>`)
     .join('');
-  elements.presetSelect.innerHTML = options;
-  elements.presetSelect.value = editingPresetId || appConfig.activePresetId;
-  elements.deletePresetButton.disabled = appConfig.presets.length <= 1;
+  elements.stPresetSelect.value = editingPresetId || group.activePresetId;
+  elements.stDeletePresetButton.disabled = group.presets.length <= 1;
 }
 
 function renderPresetForm(presetId) {
-  const preset = appConfig.presets.find((item) => item.id === presetId) || appConfig.presets[0];
+  const group = settingsGroupData();
+  const preset = group.presets.find((item) => item.id === presetId) || group.presets[0];
   editingPresetId = preset.id;
-  elements.presetSelect.value = preset.id;
-  elements.presetNameInput.value = preset.name || '';
-  elements.primaryPresetInput.checked = appConfig.activePresetId === preset.id;
-  elements.priorityInput.value = preset.priority || 1;
-  elements.presetEnabledInput.checked = preset.enabled !== false;
-  elements.baseUrlInput.value = preset.baseUrl || '';
-  elements.apiBackendInput.value = preset.apiBackend || 'responses';
-  elements.modelInput.value = preset.model || '';
-  elements.apiKeyInput.value = preset.apiKey || '';
-  elements.proxyUrlInput.value = preset.proxyUrl || '';
-  elements.autoFallbackInput.checked = appConfig.autoFallback !== false;
+  elements.stPresetSelect.value = preset.id;
+  elements.stPresetNameInput.value = preset.name || '';
+  elements.stPrimaryPresetInput.checked = group.activePresetId === preset.id;
+  elements.stPriorityInput.value = preset.priority || 1;
+  elements.stPresetEnabledInput.checked = preset.enabled !== false;
+  elements.stBaseUrlInput.value = preset.baseUrl || '';
+  elements.stApiBackendInput.value = preset.apiBackend || 'responses';
+  elements.stModelInput.value = preset.model || '';
+  elements.stApiKeyInput.value = preset.apiKey || '';
+  elements.stProxyUrlInput.value = preset.proxyUrl || '';
 }
 
-function loadConfig(config) {
-  appConfig = {
-    activePresetId: config.activePresetId,
-    autoFallback: config.autoFallback !== false,
-    systemPrompt: config.systemPrompt,
-    presets: Array.isArray(config.presets) ? config.presets.map((preset) => ({ ...preset })) : []
-  };
-  if (!appConfig.presets.length) throw new Error('没有可用的模型预设');
-  if (!appConfig.presets.some((preset) => preset.id === appConfig.activePresetId)) {
-    appConfig.activePresetId = appConfig.presets[0].id;
+function renderSettings() {
+  const isVision = settingsGroup === 'vision';
+  for (const button of elements.settingsTabs.querySelectorAll('.tab-button')) {
+    button.classList.toggle('is-active', button.dataset.group === settingsGroup);
   }
-  const selectedPresetId = appConfig.presets.some((preset) => preset.id === editingPresetId)
+  elements.tabHint.textContent = groupLabels[settingsGroup].hint;
+  elements.stPrimaryPresetLabel.textContent = `设为${isVision ? '视觉' : '对话'}模型主用预设`;
+  elements.stVisionPromptField.hidden = !isVision;
+  elements.stChatPromptField.hidden = isVision;
+  elements.stAutoFallbackInput.checked = settingsConfig.autoFallback !== false;
+  elements.stSystemPromptInput.value = settingsConfig.systemPrompt || '';
+  elements.stChatSystemPromptInput.value = settingsConfig.chatSystemPrompt || '';
+
+  const group = settingsGroupData();
+  const selectedId = group.presets.some((preset) => preset.id === editingPresetId)
     ? editingPresetId
-    : appConfig.activePresetId;
+    : group.activePresetId;
   renderPresetOptions();
-  renderPresetForm(selectedPresetId);
+  renderPresetForm(selectedId);
+}
+
+function openSettings() {
+  if (!appConfig) return;
+  settingsConfig = cloneConfig(appConfig);
+  settingsGroup = 'vision';
+  editingPresetId = '';
+  elements.saveStatus.textContent = '本地保存';
+  renderSettings();
+  elements.settingsModal.hidden = false;
+}
+
+function closeSettings() {
+  elements.settingsModal.hidden = true;
+  settingsConfig = null;
 }
 
 function createPresetId() {
@@ -275,11 +500,12 @@ function createPresetId() {
 
 function addPreset() {
   commitPresetForm();
-  const current = activePreset();
-  const nextPriority = Math.max(...appConfig.presets.map((preset) => preset.priority || 0)) + 1;
+  const group = settingsGroupData();
+  const current = editingPreset();
+  const nextPriority = Math.max(...group.presets.map((preset) => preset.priority || 0)) + 1;
   const preset = {
     id: createPresetId(),
-    name: `新预设 ${appConfig.presets.length + 1}`,
+    name: `${groupLabels[settingsGroup].name} ${group.presets.length + 1}`,
     baseUrl: current ? current.baseUrl : '',
     model: '',
     apiBackend: current ? current.apiBackend : 'responses',
@@ -288,23 +514,46 @@ function addPreset() {
     enabled: true,
     priority: nextPriority
   };
-  appConfig.presets.push(preset);
+  group.presets.push(preset);
   renderPresetOptions();
   renderPresetForm(preset.id);
-  elements.presetNameInput.focus();
-  elements.presetNameInput.select();
+  elements.stPresetNameInput.focus();
+  elements.stPresetNameInput.select();
 }
 
 function deletePreset() {
-  if (appConfig.presets.length <= 1) return;
-  const index = appConfig.presets.findIndex((preset) => preset.id === editingPresetId);
-  const wasPrimary = appConfig.activePresetId === editingPresetId;
-  appConfig.presets.splice(index, 1);
-  const nextPreset = appConfig.presets[Math.min(index, appConfig.presets.length - 1)];
-  if (wasPrimary) appConfig.activePresetId = nextPreset.id;
+  const group = settingsGroupData();
+  if (group.presets.length <= 1) return;
+  const index = group.presets.findIndex((preset) => preset.id === editingPresetId);
+  const wasPrimary = group.activePresetId === editingPresetId;
+  group.presets.splice(index, 1);
+  const nextPreset = group.presets[Math.min(index, group.presets.length - 1)];
+  if (wasPrimary) group.activePresetId = nextPreset.id;
   renderPresetOptions();
   renderPresetForm(nextPreset.id);
 }
+
+async function saveSettings() {
+  if (!settingsConfig) return;
+  commitPresetForm();
+  settingsConfig.autoFallback = elements.stAutoFallbackInput.checked;
+  settingsConfig.systemPrompt = elements.stSystemPromptInput.value.trim();
+  settingsConfig.chatSystemPrompt = elements.stChatSystemPromptInput.value.trim();
+
+  elements.saveButton.disabled = true;
+  try {
+    const saved = await api.saveConfig(settingsConfig);
+    loadConfig(saved);
+    closeSettings();
+    setCaptureStatus('模型设置已保存');
+  } catch (error) {
+    elements.saveStatus.textContent = error.message || '保存失败';
+  } finally {
+    elements.saveButton.disabled = false;
+  }
+}
+
+/* ---------- capture ---------- */
 
 function compressImage(dataUrl) {
   return new Promise((resolve) => {
@@ -333,7 +582,6 @@ function receiveScreenshot(dataUrl) {
   elements.previewWrap.classList.add('has-image');
   elements.retryAnalyzeButton.disabled = isGenerating;
   setCaptureStatus('已截图，准备分析');
-  setAnswer('');
 }
 
 async function startScreenMonitor() {
@@ -539,32 +787,33 @@ async function captureCurrentScreen() {
   return result.dataUrl;
 }
 
-async function saveConfig(showStatus = true) {
-  if (!appConfig) throw new Error('模型预设尚未加载完成');
-  commitPresetForm();
-  appConfig.autoFallback = elements.autoFallbackInput.checked;
-  const config = await api.saveConfig(appConfig);
-  loadConfig(config);
-  if (showStatus) {
-    elements.saveStatus.textContent = '已保存';
-    setTimeout(() => { elements.saveStatus.textContent = '本地保存'; }, 1800);
-  }
-}
+/* ---------- analysis & follow-up ---------- */
 
 async function analyzeScreenshot(screenshot) {
   if (typeof screenshot !== 'string' || !screenshot.startsWith('data:image/')) {
     throw new Error('没有获取到有效截图，请重试');
   }
   receiveScreenshot(screenshot);
-  await saveConfig(false);
+  const prompt = elements.promptInput.value.trim() || '请分析这张截图并给出回答。';
   const imageDataUrl = await compressImage(screenshot);
-  setAnswer('');
-  setGenerating(true);
+
+  thread = [];
+  renderThread();
+  pushMessage({ role: 'user', content: prompt, meta: '截图提问' });
+  streamingIndex = pushMessage({
+    role: 'assistant',
+    content: '',
+    model: '视觉模型',
+    meta: '等待响应…',
+    streaming: true
+  });
+
+  setGenerating(true, 'vision');
   setCaptureStatus('正在分析…');
   await api.analyzeImage({
     imageDataUrl,
-    prompt: elements.promptInput.value.trim() || '请分析这张截图并给出回答。',
-    presetId: appConfig.activePresetId
+    prompt,
+    presetId: appConfig.vision.activePresetId
   });
 }
 
@@ -579,7 +828,8 @@ async function captureAndAnalyze() {
     setGenerating(false);
     setCaptureStatus('分析失败', true);
     if (remoteConnected) setLanStatus(error.message || '远程屏幕连接失败', true);
-    setAnswer(`分析失败：\n${error.message || error}`);
+    failStreaming(streamingIndex, `分析失败：\n${error.message || error}`, '视觉模型');
+    streamingIndex = -1;
   }
 }
 
@@ -590,8 +840,42 @@ async function retryCurrentScreenshot() {
   } catch (error) {
     setGenerating(false);
     setCaptureStatus('分析失败', true);
-    setAnswer(`分析失败：\n${error.message || error}`);
+    failStreaming(streamingIndex, `分析失败：\n${error.message || error}`, '视觉模型');
+    streamingIndex = -1;
   }
+}
+
+async function sendFollowUp() {
+  const text = elements.chatInput.value.trim();
+  if (!text || isGenerating || !appConfig) return;
+  if (!hasAnswer()) {
+    setCaptureStatus('请先完成一次截图分析', true);
+    return;
+  }
+
+  elements.chatInput.value = '';
+  pushMessage({ role: 'user', content: text, meta: '追问' });
+  const history = buildChatHistory();
+
+  streamingIndex = pushMessage({
+    role: 'assistant',
+    content: '',
+    model: '对话模型',
+    meta: '等待响应…',
+    streaming: true
+  });
+
+  setGenerating(true, 'chat');
+  setCaptureStatus('正在生成追问回答…');
+  elements.chatHint.textContent = '正在生成回答…';
+  scrollThreadToBottom();
+
+  const attachImage = elements.attachImageInput.checked && currentImageDataUrl;
+  await api.chatFollowUp({
+    history,
+    imageDataUrl: attachImage ? await compressImage(currentImageDataUrl) : '',
+    presetId: appConfig.chat.activePresetId
+  });
 }
 
 function clearAll() {
@@ -600,12 +884,22 @@ function clearAll() {
   elements.previewWrap.classList.remove('has-image');
   elements.retryAnalyzeButton.disabled = true;
   setCaptureStatus(remoteConnected ? '远程屏幕连接中' : (monitorStarted ? '屏幕监听中，点击“截图并分析”' : '等待截图'));
-  setAnswer('');
+  updateComposerState();
 }
+
+function clearThread() {
+  if (isGenerating) return;
+  thread = [];
+  renderThread();
+  updateComposerState();
+}
+
+/* ---------- events ---------- */
 
 elements.captureAnalyzeButton.addEventListener('click', captureAndAnalyze);
 elements.retryAnalyzeButton.addEventListener('click', retryCurrentScreenshot);
 elements.clearButton.addEventListener('click', clearAll);
+elements.clearChatButton.addEventListener('click', clearThread);
 elements.startShareButton.addEventListener('click', startShare);
 elements.minimizeShareButton.addEventListener('click', minimizeShare);
 elements.connectRemoteButton.addEventListener('click', connectRemote);
@@ -615,60 +909,134 @@ elements.discoveredDeviceSelect.addEventListener('change', selectDiscoveredDevic
 elements.stopButton.addEventListener('click', async () => {
   await api.stopAnalysis();
 });
-elements.addPresetButton.addEventListener('click', addPreset);
-elements.deletePresetButton.addEventListener('click', deletePreset);
-elements.presetSelect.addEventListener('change', (event) => {
+elements.sendChatButton.addEventListener('click', sendFollowUp);
+elements.chatInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    sendFollowUp();
+  }
+});
+
+elements.settingsButton.addEventListener('click', openSettings);
+elements.closeSettingsButton.addEventListener('click', closeSettings);
+elements.cancelSettingsButton.addEventListener('click', closeSettings);
+elements.settingsModal.addEventListener('mousedown', (event) => {
+  if (event.target === elements.settingsModal) closeSettings();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !elements.settingsModal.hidden) closeSettings();
+});
+elements.settingsTabs.addEventListener('click', (event) => {
+  const button = event.target.closest('.tab-button');
+  if (!button || button.dataset.group === settingsGroup) return;
   commitPresetForm();
-  appConfig.autoFallback = elements.autoFallbackInput.checked;
+  settingsGroup = button.dataset.group;
+  editingPresetId = '';
+  renderSettings();
+});
+elements.stAddPresetButton.addEventListener('click', addPreset);
+elements.stDeletePresetButton.addEventListener('click', deletePreset);
+elements.stPresetSelect.addEventListener('change', (event) => {
+  commitPresetForm();
   renderPresetForm(event.target.value);
 });
-elements.primaryPresetInput.addEventListener('change', () => {
-  if (!elements.primaryPresetInput.checked) return;
-  appConfig.activePresetId = editingPresetId;
+elements.stPrimaryPresetInput.addEventListener('change', () => {
+  if (!elements.stPrimaryPresetInput.checked) return;
+  settingsGroupData().activePresetId = editingPresetId;
   elements.saveStatus.textContent = '未保存';
 });
-elements.saveButton.addEventListener('click', () => {
-  saveConfig(true).catch((error) => {
-    elements.saveStatus.textContent = error.message || '保存失败';
-  });
-});
+elements.saveButton.addEventListener('click', saveSettings);
 elements.copyButton.addEventListener('click', async () => {
-  const answer = answerMarkdown.trim();
-  if (!answer) return;
-  await api.copyText(answer);
+  const text = threadAsText().trim();
+  if (!text) return;
+  await api.copyText(text);
   elements.copyButton.textContent = '已复制';
   setTimeout(() => { elements.copyButton.textContent = '复制'; }, 1200);
 });
 
 api.onScreenCaptured(receiveScreenshot);
 api.onCaptureError((message) => setCaptureStatus(message, true));
+
 api.onAnalysisAttempt((details) => {
-  setAnswer('');
+  const message = thread[streamingIndex];
+  if (!message) return;
+  message.model = details.presetName;
+  message.meta = `视觉模型 · ${details.attempt}/${details.total}`;
+  updateMessageNode(streamingIndex);
   setCaptureStatus(`正在使用 ${details.presetName}（${details.attempt}/${details.total}）…`);
 });
 api.onAnalysisFallback((details) => {
   setCaptureStatus(`${details.failedPresetName} 请求失败，正在切换到 ${details.nextPresetName}…`, true);
 });
 api.onAnalysisChunk((chunk) => {
-  answerMarkdown += chunk;
-  elements.answerText.innerHTML = renderMarkdown(answerMarkdown);
-  elements.answerPlaceholder.style.display = 'none';
-  elements.answerText.parentElement.scrollTop = elements.answerText.parentElement.scrollHeight;
+  const message = thread[streamingIndex];
+  if (!message) return;
+  message.content += chunk;
+  updateMessageNode(streamingIndex);
+  scrollThreadToBottom();
 });
 api.onAnalysisComplete((details) => {
-  setGenerating(false);
+  finishStreaming(streamingIndex, details, '视觉模型');
   const suffix = details && details.attempts > 1 ? `，已切换到 ${details.presetName}` : '';
-  setCaptureStatus(`分析完成${suffix}，可再次点击按钮`);
+  setCaptureStatus(`分析完成${suffix}，可继续追问或再次截图`);
 });
 api.onAnalysisStopped(() => {
+  const message = thread[streamingIndex];
+  if (message) {
+    message.streaming = false;
+    message.meta = message.content ? '已停止生成' : '已取消';
+    updateMessageNode(streamingIndex);
+  }
+  streamingIndex = -1;
   setGenerating(false);
   setCaptureStatus('已停止生成');
 });
 api.onAnalysisError((message) => {
-  setGenerating(false);
   const detail = String(message || '未知错误');
-  setCaptureStatus(detail.startsWith('无法连接模型服务') ? '无法连接模型服务' : '模型请求失败', true);
-  setAnswer(`分析失败：\n${detail}`);
+  setCaptureStatus(detail.startsWith('无法连接模型服务') ? '无法连接视觉模型服务' : '模型请求失败', true);
+  failStreaming(streamingIndex, `分析失败：\n${detail}`, '视觉模型');
+  streamingIndex = -1;
+});
+
+api.onChatAttempt((details) => {
+  const message = thread[streamingIndex];
+  if (!message) return;
+  message.model = details.presetName;
+  message.meta = `对话模型 · ${details.attempt}/${details.total}`;
+  updateMessageNode(streamingIndex);
+  setCaptureStatus(`正在使用 ${details.presetName}（${details.attempt}/${details.total}）…`);
+});
+api.onChatFallback((details) => {
+  setCaptureStatus(`${details.failedPresetName} 请求失败，正在切换到 ${details.nextPresetName}…`, true);
+});
+api.onChatChunk((chunk) => {
+  const message = thread[streamingIndex];
+  if (!message) return;
+  message.content += chunk;
+  updateMessageNode(streamingIndex);
+  scrollThreadToBottom();
+});
+api.onChatComplete((details) => {
+  finishStreaming(streamingIndex, details, '对话模型');
+  const suffix = details && details.attempts > 1 ? `，已切换到 ${details.presetName}` : '';
+  setCaptureStatus(`追问完成${suffix}，可继续追问`);
+});
+api.onChatStopped(() => {
+  const message = thread[streamingIndex];
+  if (message) {
+    message.streaming = false;
+    message.meta = message.content ? '已停止生成' : '已取消';
+    updateMessageNode(streamingIndex);
+  }
+  streamingIndex = -1;
+  setGenerating(false);
+  setCaptureStatus('已停止生成');
+});
+api.onChatError((message) => {
+  const detail = String(message || '未知错误');
+  setCaptureStatus(detail.startsWith('无法连接模型服务') ? '无法连接对话模型服务' : '模型请求失败', true);
+  failStreaming(streamingIndex, `追问失败：\n${detail}`, '对话模型');
+  streamingIndex = -1;
 });
 
 api.getConfig()

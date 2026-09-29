@@ -28,9 +28,17 @@ let lanShareCapturing = false;
 const defaultSystemPrompt =
   '你是一个面试练习助手。请准确阅读截图内容，先给出结论，再给出简洁、可直接使用的回答。信息不足时请明确指出。';
 
+const defaultChatSystemPrompt =
+  '你是屏桥的追问助手。用户会基于一张屏幕截图和视觉模型已经给出的回答继续提问。请结合上下文直接作答：结论先行，解释简洁，需要代码时只给关键片段。上下文不足以确定答案时，请说明缺少什么信息。';
+
+const presetDefaults = {
+  vision: { id: 'vision-1', name: '视觉模型 1', label: '视觉' },
+  chat: { id: 'chat-1', name: '对话模型 1', label: '对话' }
+};
+
 const defaultPreset = {
-  id: 'model-1',
-  name: '模型 1',
+  id: presetDefaults.vision.id,
+  name: presetDefaults.vision.name,
   baseUrl: '',
   model: '',
   apiBackend: 'responses',
@@ -59,12 +67,14 @@ function decryptApiKey(input) {
   return String(input.apiKey || '');
 }
 
-function normalizePreset(input, index = 0) {
-  const fallbackId = index === 0 ? defaultPreset.id : `preset-${index + 1}`;
+function normalizePreset(input, index = 0, kind = 'vision') {
+  const fallback = presetDefaults[kind] || presetDefaults.vision;
+  const fallbackId = index === 0 ? fallback.id : `${kind}-preset-${index + 1}`;
+  const fallbackName = index === 0 ? fallback.name : `${fallback.label}模型 ${index + 1}`;
   const parsedPriority = Number.parseInt(input.priority, 10);
   return {
     id: String(input.id || fallbackId).trim() || fallbackId,
-    name: String(input.name || `模型 ${index + 1}`).trim() || `模型 ${index + 1}`,
+    name: String(input.name || fallbackName).trim() || fallbackName,
     baseUrl: String(input.baseUrl || '').trim(),
     model: String(input.model || '').trim(),
     apiBackend: input.apiBackend === 'chat_completions' ? 'chat_completions' : 'responses',
@@ -75,6 +85,45 @@ function normalizePreset(input, index = 0) {
   };
 }
 
+function decryptPresetList(list, kind) {
+  return list.map((preset, index) => normalizePreset({ ...preset, apiKey: decryptApiKey(preset) }, index, kind));
+}
+
+function resolveActivePresetId(presets, candidates) {
+  for (const candidate of candidates) {
+    if (candidate && presets.some((preset) => preset.id === candidate)) return candidate;
+  }
+  return presets[0].id;
+}
+
+function legacyPresetList(stored, kind) {
+  if (Array.isArray(stored.presets) && stored.presets.length) {
+    return decryptPresetList(stored.presets, kind);
+  }
+  // Migrate the original single-model configuration without losing its API key.
+  return [normalizePreset({
+    ...defaultPreset,
+    id: presetDefaults[kind].id,
+    name: presetDefaults[kind].name,
+    baseUrl: stored.baseUrl || '',
+    model: stored.model || '',
+    apiBackend: stored.apiBackend || defaultPreset.apiBackend,
+    apiKey: decryptApiKey(stored),
+    proxyUrl: stored.proxyUrl || defaultPreset.proxyUrl
+  }, 0, kind)];
+}
+
+function readPresetGroup(stored, key, kind) {
+  const group = stored && stored[key];
+  if (group && Array.isArray(group.presets) && group.presets.length) {
+    return {
+      presets: decryptPresetList(group.presets, kind),
+      requestedActivePresetId: group.activePresetId
+    };
+  }
+  return { presets: legacyPresetList(stored || {}, kind), requestedActivePresetId: null };
+}
+
 function readConfig() {
   let stored = {};
   try {
@@ -83,41 +132,38 @@ function readConfig() {
     stored = {};
   }
 
-  let presets;
-  if (Array.isArray(stored.presets) && stored.presets.length) {
-    presets = stored.presets.map((preset, index) => normalizePreset({
-      ...preset,
-      apiKey: decryptApiKey(preset)
-    }, index));
-  } else {
-    // Migrate the original single-model configuration without losing its API key.
-    presets = [normalizePreset({
-      ...defaultPreset,
-      baseUrl: stored.baseUrl || '',
-      model: stored.model || '',
-      apiBackend: stored.apiBackend || defaultPreset.apiBackend,
-      apiKey: decryptApiKey(stored),
-      proxyUrl: stored.proxyUrl || defaultPreset.proxyUrl
-    })];
-  }
+  const vision = readPresetGroup(stored, 'vision', 'vision');
+  const chat = readPresetGroup(stored, 'chat', 'chat');
 
-  const activePresetId = presets.some((preset) => preset.id === stored.activePresetId)
-    ? stored.activePresetId
-    : presets[0].id;
   return {
-    activePresetId,
+    version: 2,
     autoFallback: stored.autoFallback !== false,
-    presets,
-    systemPrompt: String(stored.systemPrompt || defaultSystemPrompt).trim()
+    systemPrompt: String(stored.systemPrompt || defaultSystemPrompt).trim(),
+    chatSystemPrompt: String(stored.chatSystemPrompt || defaultChatSystemPrompt).trim(),
+    vision: {
+      activePresetId: resolveActivePresetId(vision.presets, [vision.requestedActivePresetId, stored.activePresetId]),
+      presets: vision.presets
+    },
+    chat: {
+      activePresetId: resolveActivePresetId(chat.presets, [chat.requestedActivePresetId, stored.activePresetId]),
+      presets: chat.presets
+    }
   };
 }
 
-function writeConfig(input) {
-  const sourcePresets = Array.isArray(input.presets) && input.presets.length
+function makePresetGroup(input, kind) {
+  const source = input && Array.isArray(input.presets) && input.presets.length
     ? input.presets.slice(0, 30)
-    : [defaultPreset];
-  const presets = sourcePresets.map((preset, index) => normalizePreset(preset, index));
-  const storedPresets = presets.map((preset) => {
+    : [{ ...defaultPreset, id: presetDefaults[kind].id, name: presetDefaults[kind].name }];
+  const presets = source.map((preset, index) => normalizePreset(preset, index, kind));
+  return {
+    activePresetId: resolveActivePresetId(presets, [input && input.activePresetId]),
+    presets
+  };
+}
+
+function encryptPresetList(presets) {
+  return presets.map((preset) => {
     const storedPreset = { ...preset };
     delete storedPreset.apiKey;
     if (preset.apiKey && safeStorage.isEncryptionAvailable()) {
@@ -127,19 +173,23 @@ function writeConfig(input) {
     }
     return storedPreset;
   });
-  const activePresetId = presets.some((preset) => preset.id === input.activePresetId)
-    ? input.activePresetId
-    : presets[0].id;
+}
+
+function writeConfig(input) {
+  const vision = makePresetGroup(input.vision, 'vision');
+  const chat = makePresetGroup(input.chat, 'chat');
   const storedConfig = {
-    activePresetId,
+    version: 2,
     autoFallback: input.autoFallback !== false,
-    presets: storedPresets,
-    systemPrompt: String(input.systemPrompt || defaultSystemPrompt).trim()
+    systemPrompt: String(input.systemPrompt || defaultSystemPrompt).trim(),
+    chatSystemPrompt: String(input.chatSystemPrompt || defaultChatSystemPrompt).trim(),
+    vision: { activePresetId: vision.activePresetId, presets: encryptPresetList(vision.presets) },
+    chat: { activePresetId: chat.activePresetId, presets: encryptPresetList(chat.presets) }
   };
 
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
   fs.writeFileSync(configPath(), JSON.stringify(storedConfig, null, 2), 'utf8');
-  return { ...storedConfig, presets, activePresetId };
+  return { ...storedConfig, vision, chat };
 }
 
 function sendToRenderer(channel, payload) {
@@ -481,49 +531,14 @@ async function stopLanShare() {
   return { ok: true };
 }
 
-async function streamChatCompletion({ imageDataUrl, prompt }, config) {
-  if (!config.baseUrl) throw new Error('请先填写模型 API 地址');
-  if (!config.model) throw new Error('请先填写模型名称');
+function endpointFor(config, apiBackend) {
+  return `${config.baseUrl.replace(/\/+$/, '')}/${apiBackend === 'responses' ? 'responses' : 'chat/completions'}`;
+}
 
-  if (typeof imageDataUrl !== 'string' || !imageDataUrl.startsWith('data:image/')) {
-    throw new Error('截图数据无效，请重新点击“截图并分析”');
-  }
-
-  const apiBackend = resolveApiBackend(config);
-  const endpoint = `${config.baseUrl.replace(/\/+$/, '')}/${apiBackend === 'responses' ? 'responses' : 'chat/completions'}`;
+async function streamCompletion({ config, apiBackend, requestBody, eventName }) {
+  const endpoint = endpointFor(config, apiBackend);
   const headers = { 'Content-Type': 'application/json' };
   if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
-
-  const requestBody = apiBackend === 'responses'
-    ? {
-        model: config.model,
-        stream: true,
-        instructions: config.systemPrompt,
-        input: [
-          {
-            role: 'user',
-            content: [
-              { type: 'input_text', text: prompt },
-              { type: 'input_image', image_url: imageDataUrl, detail: 'high' }
-            ]
-          }
-        ]
-      }
-    : {
-        model: config.model,
-        stream: true,
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: config.systemPrompt },
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } }
-            ]
-          }
-        ]
-      };
 
   const controller = new AbortController();
   activeAbortController = controller;
@@ -560,7 +575,7 @@ async function streamChatCompletion({ imageDataUrl, prompt }, config) {
     const json = await response.json();
     const text = apiBackend === 'responses' ? extractResponsesText(json) : extractDelta(json);
     if (!text) throw new Error('模型没有返回可显示的内容');
-    sendToRenderer('analysis-chunk', text);
+    sendToRenderer(`${eventName}-chunk`, text);
     return;
   }
 
@@ -594,7 +609,7 @@ async function streamChatCompletion({ imageDataUrl, prompt }, config) {
           : '');
         if (text) {
           receivedText = true;
-          sendToRenderer('analysis-chunk', text);
+          sendToRenderer(`${eventName}-chunk`, text);
         }
       } catch {
         // Ignore keep-alive or provider-specific non-JSON SSE frames.
@@ -612,26 +627,130 @@ async function streamChatCompletion({ imageDataUrl, prompt }, config) {
   if (!receivedText) throw new Error('模型没有返回可显示的内容');
 }
 
-function buildPresetQueue(config, requestedPresetId) {
-  const selected = config.presets.find((preset) => preset.id === requestedPresetId)
-    || config.presets.find((preset) => preset.id === config.activePresetId)
-    || config.presets[0];
-  if (!config.autoFallback) return [selected];
+async function streamVisionAnalysis(payload, config) {
+  if (!config.baseUrl) throw new Error('请先在设置中填写视觉模型 API 地址');
+  if (!config.model) throw new Error('请先在设置中填写视觉模型名称');
 
-  const fallbackPresets = config.presets
+  const imageDataUrl = payload && payload.imageDataUrl;
+  if (typeof imageDataUrl !== 'string' || !imageDataUrl.startsWith('data:image/')) {
+    throw new Error('截图数据无效，请重新点击“截图并分析”');
+  }
+
+  const prompt = (payload && payload.prompt) || '请分析这张截图并给出回答。';
+  const apiBackend = resolveApiBackend(config);
+  const requestBody = apiBackend === 'responses'
+    ? {
+        model: config.model,
+        stream: true,
+        instructions: config.systemPrompt,
+        input: [
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: prompt },
+              { type: 'input_image', image_url: imageDataUrl, detail: 'high' }
+            ]
+          }
+        ]
+      }
+    : {
+        model: config.model,
+        stream: true,
+        temperature: 0.2,
+        messages: [
+          { role: 'system', content: config.systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } }
+            ]
+          }
+        ]
+      };
+
+  await streamCompletion({ config, apiBackend, requestBody, eventName: 'analysis' });
+}
+
+function sanitizeHistory(history) {
+  if (!Array.isArray(history)) return [];
+  return history
+    .filter((item) => item
+      && (item.role === 'user' || item.role === 'assistant')
+      && typeof item.content === 'string'
+      && item.content.trim())
+    .map((item) => ({ role: item.role, content: item.content }));
+}
+
+async function streamChatFollowUp(payload, config) {
+  if (!config.baseUrl) throw new Error('请先在设置中填写对话模型 API 地址');
+  if (!config.model) throw new Error('请先在设置中填写对话模型名称');
+
+  const source = payload || {};
+  const history = sanitizeHistory(source.history).slice(-20);
+  if (!history.length) throw new Error('没有可发送的对话内容');
+
+  const rawImage = source.imageDataUrl;
+  const imageDataUrl = typeof rawImage === 'string' && rawImage.startsWith('data:image/') ? rawImage : '';
+  const systemPrompt = config.chatSystemPrompt;
+  const apiBackend = resolveApiBackend(config);
+
+  let requestBody;
+  if (apiBackend === 'responses') {
+    requestBody = {
+      model: config.model,
+      stream: true,
+      instructions: systemPrompt,
+      input: history.map((item, index) => {
+        const content = [];
+        // Only the first turn carries the screenshot, keeping follow-ups cheap.
+        if (index === 0 && imageDataUrl) {
+          content.push({ type: 'input_image', image_url: imageDataUrl, detail: 'high' });
+        }
+        content.push({ type: 'input_text', text: item.content });
+        return { role: item.role, content };
+      })
+    };
+  } else {
+    const messages = [{ role: 'system', content: systemPrompt }];
+    history.forEach((item, index) => {
+      if (index === 0 && imageDataUrl) {
+        messages.push({
+          role: item.role,
+          content: [
+            { type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } },
+            { type: 'text', text: item.content }
+          ]
+        });
+      } else {
+        messages.push({ role: item.role, content: item.content });
+      }
+    });
+    requestBody = { model: config.model, stream: true, temperature: 0.2, messages };
+  }
+
+  await streamCompletion({ config, apiBackend, requestBody, eventName: 'chat' });
+}
+
+function buildPresetQueue(group, requestedPresetId, autoFallback) {
+  const selected = group.presets.find((preset) => preset.id === requestedPresetId)
+    || group.presets.find((preset) => preset.id === group.activePresetId)
+    || group.presets[0];
+  if (!autoFallback) return [selected];
+
+  const fallbackPresets = group.presets
     .filter((preset) => preset.id !== selected.id && preset.enabled)
     .sort((left, right) => left.priority - right.priority);
   return [selected, ...fallbackPresets];
 }
 
-async function analyzeWithFallback(payload) {
-  const config = readConfig();
-  const queue = buildPresetQueue(config, payload.presetId);
+async function runWithFallback({ group, autoFallback, requestedPresetId, eventName, run }) {
+  const queue = buildPresetQueue(group, requestedPresetId, autoFallback);
   const failures = [];
 
   for (let index = 0; index < queue.length; index += 1) {
     const preset = queue[index];
-    sendToRenderer('analysis-attempt', {
+    sendToRenderer(`${eventName}-attempt`, {
       presetId: preset.id,
       presetName: preset.name,
       attempt: index + 1,
@@ -639,14 +758,14 @@ async function analyzeWithFallback(payload) {
     });
 
     try {
-      await streamChatCompletion(payload, { ...preset, systemPrompt: config.systemPrompt });
+      await run(preset);
       return { presetId: preset.id, presetName: preset.name, attempts: index + 1 };
     } catch (error) {
       if (error.name === 'AbortError') throw error;
       failures.push(`${preset.name}：${error.message}`);
       const nextPreset = queue[index + 1];
       if (nextPreset) {
-        sendToRenderer('analysis-fallback', {
+        sendToRenderer(`${eventName}-fallback`, {
           failedPresetName: preset.name,
           nextPresetName: nextPreset.name,
           error: error.message
@@ -698,7 +817,14 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('analyze-image', async (_event, payload) => {
     try {
-      const result = await analyzeWithFallback(payload);
+      const config = readConfig();
+      const result = await runWithFallback({
+        group: config.vision,
+        autoFallback: config.autoFallback,
+        requestedPresetId: payload && payload.presetId,
+        eventName: 'analysis',
+        run: (preset) => streamVisionAnalysis(payload, { ...preset, systemPrompt: config.systemPrompt })
+      });
       sendToRenderer('analysis-complete', result);
       return { ok: true, ...result };
     } catch (error) {
@@ -707,6 +833,30 @@ app.whenReady().then(() => {
         return { ok: false, stopped: true };
       }
       sendToRenderer('analysis-error', error.message);
+      return { ok: false, error: error.message };
+    } finally {
+      activeAbortController = null;
+    }
+  });
+
+  ipcMain.handle('chat-followup', async (_event, payload) => {
+    try {
+      const config = readConfig();
+      const result = await runWithFallback({
+        group: config.chat,
+        autoFallback: config.autoFallback,
+        requestedPresetId: payload && payload.presetId,
+        eventName: 'chat',
+        run: (preset) => streamChatFollowUp(payload, { ...preset, chatSystemPrompt: config.chatSystemPrompt })
+      });
+      sendToRenderer('chat-complete', result);
+      return { ok: true, ...result };
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        sendToRenderer('chat-stopped');
+        return { ok: false, stopped: true };
+      }
+      sendToRenderer('chat-error', error.message);
       return { ok: false, error: error.message };
     } finally {
       activeAbortController = null;

@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('assistantAPI', {
   discoverLanShares: () => ipcRenderer.invoke('discover-lan-shares'),
   minimizeLanShare: () => ipcRenderer.invoke('minimize-lan-share'),
   analyzeImage: (payload) => ipcRenderer.invoke('analyze-image', payload),
+  chatFollowUp: (payload) => ipcRenderer.invoke('chat-followup', payload),
   stopAnalysis: () => ipcRenderer.invoke('stop-analysis'),
   copyText: (text) => ipcRenderer.invoke('copy-text', text),
   onScreenCaptured: (callback) => ipcRenderer.on('screen-captured', (_event, dataUrl) => callback(dataUrl)),
@@ -19,5 +20,11 @@ contextBridge.exposeInMainWorld('assistantAPI', {
   onAnalysisChunk: (callback) => ipcRenderer.on('analysis-chunk', (_event, chunk) => callback(chunk)),
   onAnalysisComplete: (callback) => ipcRenderer.on('analysis-complete', (_event, details) => callback(details)),
   onAnalysisStopped: (callback) => ipcRenderer.on('analysis-stopped', () => callback()),
-  onAnalysisError: (callback) => ipcRenderer.on('analysis-error', (_event, message) => callback(message))
+  onAnalysisError: (callback) => ipcRenderer.on('analysis-error', (_event, message) => callback(message)),
+  onChatAttempt: (callback) => ipcRenderer.on('chat-attempt', (_event, details) => callback(details)),
+  onChatFallback: (callback) => ipcRenderer.on('chat-fallback', (_event, details) => callback(details)),
+  onChatChunk: (callback) => ipcRenderer.on('chat-chunk', (_event, chunk) => callback(chunk)),
+  onChatComplete: (callback) => ipcRenderer.on('chat-complete', (_event, details) => callback(details)),
+  onChatStopped: (callback) => ipcRenderer.on('chat-stopped', () => callback()),
+  onChatError: (callback) => ipcRenderer.on('chat-error', (_event, message) => callback(message))
 });
