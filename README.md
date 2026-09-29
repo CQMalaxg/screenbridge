@@ -10,8 +10,8 @@
 
 <https://github.com/CQMalaxg/screenbridge/releases>
 
-- `ScreenBridge.Setup.0.3.0.exe`：Windows 安装包，推荐普通用户使用
-- `ScreenBridge-0.3.0-win.zip`：免安装便携版
+- `屏桥 ScreenBridge Setup 0.4.0.exe`：Windows 安装包，推荐普通用户使用
+- `屏桥 ScreenBridge-0.4.0-win.zip`：免安装便携版
 
 安装包安装完成后，直接从开始菜单或桌面启动“屏桥 ScreenBridge”。使用安装包不需要另外安装 Node.js 或 npm。
 
