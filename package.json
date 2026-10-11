@@ -1,6 +1,6 @@
 {
   "name": "screenbridge",
-  "version": "0.4.2",
+  "version": "0.4.4",
   "description": "屏桥 ScreenBridge - LAN screen bridge and vision LLM assistant",
   "author": "CQMalaxg",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
-    "check": "node --check main.js && node --check preload.js && node --check tray-lifecycle.js && node --check renderer/renderer.js && node --check server/relay.js && node --check server/public/viewer.js && node --check server/public/workbench.js",
+    "check": "node --check main.js && node --check cloud-pair.js && node --check preload.js && node --check tray-lifecycle.js && node --check renderer/renderer.js && node --check server/relay.js && node --check server/public/viewer.js && node --check server/public/workbench.js",
     "test": "node --test server/test/*.test.js test/*.test.js"
   },
   "build": {
@@ -17,6 +17,8 @@
     "productName": "屏桥 ScreenBridge",
     "files": [
       "main.js",
+      "cloud-pair.js",
+      "prompt-presets.js",
       "preload.js",
       "tray-lifecycle.js",
       "renderer/**/*",

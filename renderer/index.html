@@ -159,6 +159,10 @@
             <button class="ghost-button" id="minimizeShareButton" disabled>最小化共享端</button>
           </div>
           <div class="share-info" id="shareInfo">在题目所在电脑启动共享端，然后把地址和配对码填到另一台电脑。</div>
+          <label>
+            指定搜索范围（可选）
+            <input id="discoverTargetInput" type="text" placeholder="例如 10.20.30.45 或 10.20.30.0/24" />
+          </label>
           <div class="discovery-row">
             <select id="discoveredDeviceSelect" aria-label="选择发现的共享设备">
               <option value="">发现的共享设备</option>
@@ -178,7 +182,7 @@
             <button class="primary-button" id="connectRemoteButton">连接远程屏幕</button>
             <button class="ghost-button" id="disconnectRemoteButton" disabled>断开</button>
           </div>
-          <div class="hint">两台电脑需要在同一个局域网。共享端启动后建议最小化窗口，避免把共享端 App 自己录进去。</div>
+          <div class="hint">两台电脑需要在同一个网段。校园网常把有线与无线分到不同 VLAN，或开启无线客户端隔离，此时广播搜索会失效：请让两台设备都插网线，或用其中一台开“移动热点”让另一台连接，也可在此直接填写共享端地址。共享端启动后建议最小化窗口，避免把共享端 App 自己录进去。</div>
         </section>
       </section>
 
