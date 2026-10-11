@@ -4,10 +4,12 @@ const {
   clipboard,
   desktopCapturer,
   ipcMain,
+  Menu,
   net,
   safeStorage,
   screen,
-  session
+  session,
+  Tray
 } = require('electron');
 const crypto = require('crypto');
 const dgram = require('dgram');
@@ -15,8 +17,12 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const WebSocket = require('ws');
+const { createTrayLifecycle } = require('./tray-lifecycle');
 
 let mainWindow;
+let trayLifecycle = null;
+let isQuitting = false;
 let activeAbortController = null;
 let lanShareServer = null;
 let lanDiscoverySocket = null;
@@ -24,12 +30,19 @@ let lanShareTimer = null;
 let lanShareToken = '';
 let lanShareFrame = null;
 let lanShareCapturing = false;
+let lanShareCapturePromise = null;
+let cloudPairCredentials = null;
+let cloudPairSocket = null;
+let cloudPairRetryTimer = null;
+let cloudPairPaired = false;
+
+const defaultRelayUrl = 'https://screenbridge.zahml.top';
 
 const defaultSystemPrompt =
-  '你是一个面试练习助手。请准确阅读截图内容，先给出结论，再给出简洁、可直接使用的回答。信息不足时请明确指出。';
+  '你是一个面试练习助手。请准确阅读用户提供的一张或多张截图，先给出结论，再给出简洁、可直接使用的回答。信息不足时请明确指出。';
 
 const defaultChatSystemPrompt =
-  '你是屏桥的追问助手。用户会基于一张屏幕截图和视觉模型已经给出的回答继续提问。请结合上下文直接作答：结论先行，解释简洁，需要代码时只给关键片段。上下文不足以确定答案时，请说明缺少什么信息。';
+  '你是屏桥的追问助手。用户会基于本轮一张或多张屏幕截图和视觉模型已经给出的回答继续提问。请结合上下文直接作答：结论先行，解释简洁，需要代码时只给关键片段。上下文不足以确定答案时，请说明缺少什么信息。';
 
 const presetDefaults = {
   vision: { id: 'vision-1', name: '视觉模型 1', label: '视觉' },
@@ -124,6 +137,29 @@ function readPresetGroup(stored, key, kind) {
   return { presets: legacyPresetList(stored || {}, kind), requestedActivePresetId: null };
 }
 
+function normalizePromptPresets(input, kind) {
+  const source = input && Array.isArray(input[kind]) ? input[kind] : [];
+  const usedIds = new Set();
+  return source.map((entry, index) => {
+    const preset = entry && typeof entry === 'object' ? entry : {};
+    const fallbackId = `${kind}-prompt-${index + 1}`;
+    const baseId = String(preset.id || fallbackId).trim() || fallbackId;
+    let id = baseId;
+    let suffix = 2;
+    while (usedIds.has(id)) {
+      id = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    usedIds.add(id);
+
+    return {
+      id,
+      name: String(preset.name || '').trim() || `${kind === 'vision' ? '截图回答' : '追问'} ${index + 1}`,
+      text: String(preset.text ?? '')
+    };
+  });
+}
+
 function readConfig() {
   let stored = {};
   try {
@@ -147,13 +183,17 @@ function readConfig() {
     chat: {
       activePresetId: resolveActivePresetId(chat.presets, [chat.requestedActivePresetId, stored.activePresetId]),
       presets: chat.presets
+    },
+    promptPresets: {
+      vision: normalizePromptPresets(stored.promptPresets, 'vision'),
+      chat: normalizePromptPresets(stored.promptPresets, 'chat')
     }
   };
 }
 
 function makePresetGroup(input, kind) {
   const source = input && Array.isArray(input.presets) && input.presets.length
-    ? input.presets.slice(0, 30)
+    ? input.presets
     : [{ ...defaultPreset, id: presetDefaults[kind].id, name: presetDefaults[kind].name }];
   const presets = source.map((preset, index) => normalizePreset(preset, index, kind));
   return {
@@ -178,18 +218,27 @@ function encryptPresetList(presets) {
 function writeConfig(input) {
   const vision = makePresetGroup(input.vision, 'vision');
   const chat = makePresetGroup(input.chat, 'chat');
+  const promptPresets = {
+    vision: normalizePromptPresets(input.promptPresets, 'vision'),
+    chat: normalizePromptPresets(input.promptPresets, 'chat')
+  };
   const storedConfig = {
     version: 2,
     autoFallback: input.autoFallback !== false,
     systemPrompt: String(input.systemPrompt || defaultSystemPrompt).trim(),
     chatSystemPrompt: String(input.chatSystemPrompt || defaultChatSystemPrompt).trim(),
     vision: { activePresetId: vision.activePresetId, presets: encryptPresetList(vision.presets) },
-    chat: { activePresetId: chat.activePresetId, presets: encryptPresetList(chat.presets) }
+    chat: { activePresetId: chat.activePresetId, presets: encryptPresetList(chat.presets) },
+    promptPresets
   };
 
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
   fs.writeFileSync(configPath(), JSON.stringify(storedConfig, null, 2), 'utf8');
-  return { ...storedConfig, vision, chat };
+  return {
+    ...storedConfig,
+    vision,
+    chat
+  };
 }
 
 function sendToRenderer(channel, payload) {
@@ -207,12 +256,14 @@ async function capturePrimaryScreen() {
     throw new Error('应用窗口尚未准备好');
   }
 
-  mainWindow.hide();
-  // Give Windows time to remove the assistant window from the compositor before
-  // taking the thumbnail, so the question underneath is included instead.
-  await wait(280);
-
+  let contentProtectionEnabled = false;
   try {
+    // Exclude the assistant window from the captured frame without hiding it or
+    // changing focus, so the content underneath remains visible without a flash.
+    mainWindow.setContentProtection(true);
+    contentProtectionEnabled = true;
+    await wait(80);
+
     const primaryDisplay = screen.getPrimaryDisplay();
     const displaySize = primaryDisplay.size;
     const thumbnailSize = {
@@ -232,14 +283,11 @@ async function capturePrimaryScreen() {
     }
 
     const dataUrl = source.thumbnail.toDataURL();
-    mainWindow.show();
-    mainWindow.focus();
-    sendToRenderer('screen-captured', dataUrl);
     return { ok: true, dataUrl };
-  } catch (error) {
-    mainWindow.show();
-    mainWindow.focus();
-    throw error;
+  } finally {
+    if (contentProtectionEnabled && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setContentProtection(false);
+    }
   }
 }
 
@@ -329,29 +377,208 @@ function getLanAddresses() {
 }
 
 async function captureLanFrame() {
-  if (lanShareCapturing) return lanShareFrame;
-  lanShareCapturing = true;
-  try {
-    const primaryDisplay = screen.getPrimaryDisplay();
-    const displaySize = primaryDisplay.size;
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: {
-        width: Math.max(1280, Math.min(displaySize.width, 1920)),
-        height: Math.max(720, Math.min(displaySize.height, 1080))
-      },
-      fetchWindowIcons: false
-    });
-    const source =
-      sources.find((item) => String(item.display_id) === String(primaryDisplay.id)) || sources[0];
-    if (!source || !source.thumbnail || source.thumbnail.isEmpty()) {
-      throw new Error('没有找到共享端屏幕画面');
+  if (lanShareCapturePromise) return lanShareCapturePromise;
+  const capturePromise = (async () => {
+    lanShareCapturing = true;
+    let contentProtectionEnabled = false;
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setContentProtection(true);
+        contentProtectionEnabled = true;
+        await wait(80);
+      }
+      const primaryDisplay = screen.getPrimaryDisplay();
+      const displaySize = primaryDisplay.size;
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: {
+          width: Math.max(1280, Math.min(displaySize.width, 1920)),
+          height: Math.max(720, Math.min(displaySize.height, 1080))
+        },
+        fetchWindowIcons: false
+      });
+      const source =
+        sources.find((item) => String(item.display_id) === String(primaryDisplay.id)) || sources[0];
+      if (!source || !source.thumbnail || source.thumbnail.isEmpty()) {
+        throw new Error('没有找到共享端屏幕画面');
+      }
+      lanShareFrame = source.thumbnail.toJPEG(72);
+      return lanShareFrame;
+    } finally {
+      if (contentProtectionEnabled && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setContentProtection(false);
+      }
+      lanShareCapturing = false;
     }
-    lanShareFrame = source.thumbnail.toJPEG(72);
-    return lanShareFrame;
+  })();
+  lanShareCapturePromise = capturePromise;
+  try {
+    return await capturePromise;
   } finally {
-    lanShareCapturing = false;
+    if (lanShareCapturePromise === capturePromise) lanShareCapturePromise = null;
   }
+}
+
+function getRelayBaseUrl() {
+  const relayUrl = String(process.env.SCREENBRIDGE_RELAY_URL || defaultRelayUrl).replace(/\/+$/, '');
+  const parsed = new URL(relayUrl);
+  if (parsed.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(parsed.hostname)) {
+    throw new Error('公网中继必须使用 HTTPS');
+  }
+  return relayUrl;
+}
+
+function sendCloudShareStatus(state, message = '') {
+  sendToRenderer('cloud-share-status', { state, message });
+}
+
+function sendCloudConfig() {
+  if (!cloudPairSocket
+      || cloudPairSocket.readyState !== WebSocket.OPEN
+      || !cloudPairPaired) return;
+  cloudPairSocket.send(JSON.stringify({
+    type: 'config',
+    config: readConfig()
+  }));
+}
+
+function connectCloudPair() {
+  if (!cloudPairCredentials || cloudPairSocket || cloudPairRetryTimer) return;
+  const credentials = cloudPairCredentials;
+  if (!cloudPairPaired && credentials.expiresAt <= Date.now()) {
+    cloudPairCredentials = null;
+    sendCloudShareStatus('expired', '配对码已过期，请重新创建');
+    return;
+  }
+
+  let relayBase;
+  try {
+    relayBase = getRelayBaseUrl();
+  } catch (error) {
+    sendCloudShareStatus('error', error.message);
+    return;
+  }
+  const websocketUrl = relayBase.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:') + '/ws';
+  const socket = new WebSocket(websocketUrl, { handshakeTimeout: 10_000, perMessageDeflate: false });
+  cloudPairSocket = socket;
+  sendCloudShareStatus('connecting', '正在连接公网中继…');
+
+  socket.on('open', () => {
+    if (cloudPairSocket !== socket || !cloudPairCredentials) return socket.close();
+    socket.send(JSON.stringify({
+      type: 'authenticate',
+      code: credentials.code,
+      secret: credentials.secret
+    }));
+  });
+  socket.on('message', async (data, isBinary) => {
+    if (isBinary || cloudPairSocket !== socket) return;
+    let message;
+    try {
+      message = JSON.parse(data.toString());
+    } catch {
+      return;
+    }
+    if (message.type === 'authenticated') {
+      sendCloudShareStatus('connected', '公网共享已连接，等待查看设备');
+    } else if (message.type === 'frame-request') {
+      try {
+        const frame = await captureLanFrame();
+        if (cloudPairSocket === socket && socket.readyState === WebSocket.OPEN) socket.send(frame);
+      } catch (error) {
+        if (cloudPairSocket === socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'frame-error', message: error.message || '采集屏幕失败' }));
+        }
+      }
+    } else if (message.type === 'error') {
+      sendCloudShareStatus('error', message.message || '公网配对连接失败');
+    } else if (message.type === 'source-connected') {
+      sendCloudShareStatus('connected', '公网共享已连接，查看设备可以取图');
+    } else if (message.type === 'viewer-connected') {
+      cloudPairPaired = true;
+      sendCloudConfig();
+      sendCloudShareStatus('paired', '查看设备已连接；心跳保活中，直到任一端或网络断开');
+    } else if (message.type === 'viewer-disconnected') {
+      sendCloudShareStatus('connected', '查看设备已断开，配对码仍可使用');
+    }
+  });
+  socket.on('error', (error) => {
+    if (cloudPairSocket === socket) sendCloudShareStatus('connecting', `中继连接暂不可用：${error.message}`);
+  });
+  socket.on('close', () => {
+    if (cloudPairSocket !== socket) return;
+    cloudPairSocket = null;
+    if (!cloudPairCredentials) return;
+    if (cloudPairPaired) {
+      cloudPairCredentials = null;
+      cloudPairPaired = false;
+      sendCloudShareStatus('disconnected', '连接已断开，旧配对码已失效；如需继续请创建新的配对码');
+      return;
+    }
+    if (cloudPairCredentials.expiresAt <= Date.now()) {
+      cloudPairCredentials = null;
+      sendCloudShareStatus('expired', '配对码已过期，请重新创建');
+      return;
+    }
+    sendCloudShareStatus('connecting', '公网连接中断，正在重连…');
+    cloudPairRetryTimer = setTimeout(() => {
+      cloudPairRetryTimer = null;
+      connectCloudPair();
+    }, 2500);
+    cloudPairRetryTimer.unref?.();
+  });
+}
+
+async function startCloudShare() {
+  if (cloudPairCredentials && (cloudPairPaired || cloudPairCredentials.expiresAt > Date.now())) {
+    connectCloudPair();
+    return {
+      code: cloudPairCredentials.code,
+      expiresAt: cloudPairCredentials.expiresAt,
+      viewerUrl: `${getRelayBaseUrl()}/view`
+    };
+  }
+
+  const relayBase = getRelayBaseUrl();
+  sendCloudShareStatus('creating', '正在创建配对码…');
+  const response = await fetch(`${relayBase}/api/pair`, {
+    method: 'POST',
+    cache: 'no-store',
+    signal: AbortSignal.timeout(10_000)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `中继返回 HTTP ${response.status}`);
+
+  cloudPairCredentials = {
+    code: String(result.code || '').replace(/-/g, ''),
+    secret: String(result.secret || ''),
+    expiresAt: Number(result.expiresAt)
+  };
+  if (!/^[A-HJ-NP-Z2-9]{8}$/.test(cloudPairCredentials.code) || !cloudPairCredentials.secret) {
+    cloudPairCredentials = null;
+    throw new Error('中继返回的配对信息格式无效');
+  }
+  connectCloudPair();
+  return {
+    code: `${cloudPairCredentials.code.slice(0, 4)}-${cloudPairCredentials.code.slice(4)}`,
+    expiresAt: cloudPairCredentials.expiresAt,
+    viewerUrl: `${relayBase}/view`
+  };
+}
+
+function stopCloudShare() {
+  cloudPairCredentials = null;
+  cloudPairPaired = false;
+  if (cloudPairRetryTimer) clearTimeout(cloudPairRetryTimer);
+  cloudPairRetryTimer = null;
+  if (cloudPairSocket) {
+    const socket = cloudPairSocket;
+    cloudPairSocket = null;
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'stop' }));
+    socket.close();
+  }
+  sendCloudShareStatus('stopped', '公网共享已停止，旧配对码已失效');
+  return { ok: true };
 }
 
 function lanShareInfo() {
@@ -489,6 +716,15 @@ async function startLanShare() {
         response.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify({ error: error.message }));
       }
+      return;
+    }
+
+    if (requestUrl.pathname === '/config') {
+      response.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      response.end(JSON.stringify(readConfig()));
       return;
     }
 
@@ -631,12 +867,16 @@ async function streamVisionAnalysis(payload, config) {
   if (!config.baseUrl) throw new Error('请先在设置中填写视觉模型 API 地址');
   if (!config.model) throw new Error('请先在设置中填写视觉模型名称');
 
-  const imageDataUrl = payload && payload.imageDataUrl;
-  if (typeof imageDataUrl !== 'string' || !imageDataUrl.startsWith('data:image/')) {
-    throw new Error('截图数据无效，请重新点击“截图并分析”');
+  const rawImageDataUrls = Array.isArray(payload && payload.imageDataUrls)
+    ? payload.imageDataUrls
+    : [payload && payload.imageDataUrl];
+  const imageDataUrls = rawImageDataUrls.filter((imageDataUrl) =>
+    typeof imageDataUrl === 'string' && imageDataUrl.startsWith('data:image/'));
+  if (imageDataUrls.length === 0 || imageDataUrls.length !== rawImageDataUrls.length) {
+    throw new Error('截图数据无效，请重新添加截图');
   }
 
-  const prompt = (payload && payload.prompt) || '请分析这张截图并给出回答。';
+  const prompt = (payload && payload.prompt) || '请分析这些截图并给出回答。';
   const apiBackend = resolveApiBackend(config);
   const requestBody = apiBackend === 'responses'
     ? {
@@ -648,7 +888,7 @@ async function streamVisionAnalysis(payload, config) {
             role: 'user',
             content: [
               { type: 'input_text', text: prompt },
-              { type: 'input_image', image_url: imageDataUrl, detail: 'high' }
+              ...imageDataUrls.map((imageDataUrl) => ({ type: 'input_image', image_url: imageDataUrl, detail: 'high' }))
             ]
           }
         ]
@@ -663,7 +903,7 @@ async function streamVisionAnalysis(payload, config) {
             role: 'user',
             content: [
               { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } }
+              ...imageDataUrls.map((imageDataUrl) => ({ type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } }))
             ]
           }
         ]
@@ -690,8 +930,11 @@ async function streamChatFollowUp(payload, config) {
   const history = sanitizeHistory(source.history).slice(-20);
   if (!history.length) throw new Error('没有可发送的对话内容');
 
-  const rawImage = source.imageDataUrl;
-  const imageDataUrl = typeof rawImage === 'string' && rawImage.startsWith('data:image/') ? rawImage : '';
+  const rawImageDataUrls = Array.isArray(source.imageDataUrls)
+    ? source.imageDataUrls
+    : [source.imageDataUrl];
+  const imageDataUrls = rawImageDataUrls.filter((imageDataUrl) =>
+    typeof imageDataUrl === 'string' && imageDataUrl.startsWith('data:image/'));
   const systemPrompt = config.chatSystemPrompt;
   const apiBackend = resolveApiBackend(config);
 
@@ -703,9 +946,11 @@ async function streamChatFollowUp(payload, config) {
       instructions: systemPrompt,
       input: history.map((item, index) => {
         const content = [];
-        // Only the first turn carries the screenshot, keeping follow-ups cheap.
-        if (index === 0 && imageDataUrl) {
-          content.push({ type: 'input_image', image_url: imageDataUrl, detail: 'high' });
+        // Only the first turn carries screenshots, keeping follow-ups cheap.
+        if (index === 0 && imageDataUrls.length) {
+          content.push(...imageDataUrls.map((imageDataUrl) => ({
+            type: 'input_image', image_url: imageDataUrl, detail: 'high'
+          })));
         }
         content.push({ type: 'input_text', text: item.content });
         return { role: item.role, content };
@@ -714,11 +959,13 @@ async function streamChatFollowUp(payload, config) {
   } else {
     const messages = [{ role: 'system', content: systemPrompt }];
     history.forEach((item, index) => {
-      if (index === 0 && imageDataUrl) {
+      if (index === 0 && imageDataUrls.length) {
         messages.push({
           role: item.role,
           content: [
-            { type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } },
+            ...imageDataUrls.map((imageDataUrl) => ({
+              type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' }
+            })),
             { type: 'text', text: item.content }
           ]
         });
@@ -792,16 +1039,23 @@ function createWindow() {
     }
   });
 
+  trayLifecycle?.attachWindow(mainWindow);
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
 app.whenReady().then(() => {
   ipcMain.handle('get-config', () => readConfig());
-  ipcMain.handle('save-config', (_event, config) => writeConfig(config));
+  ipcMain.handle('save-config', (_event, config) => {
+    const saved = writeConfig(config);
+    sendCloudConfig();
+    return saved;
+  });
   ipcMain.handle('get-screen-source', () => extractScreenSource());
   ipcMain.handle('capture-screen', () => capturePrimaryScreen());
   ipcMain.handle('start-lan-share', () => startLanShare());
   ipcMain.handle('stop-lan-share', () => stopLanShare());
+  ipcMain.handle('start-cloud-share', () => startCloudShare());
+  ipcMain.handle('stop-cloud-share', () => stopCloudShare());
   ipcMain.handle('discover-lan-shares', () => discoverLanShares());
   ipcMain.handle('minimize-lan-share', () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
@@ -863,14 +1117,27 @@ app.whenReady().then(() => {
     }
   });
 
+  trayLifecycle = createTrayLifecycle({
+    app,
+    Tray,
+    Menu,
+    getWindow: () => mainWindow,
+    iconPath: path.join(__dirname, 'assets', 'icon.ico')
+  });
   createWindow();
 });
 
 app.on('window-all-closed', () => {
   stopLanShare().catch(() => {});
-  if (process.platform !== 'darwin') app.quit();
+  stopCloudShare();
+  if (process.platform !== 'darwin' && !isQuitting) app.quit();
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  else trayLifecycle?.showWindow();
+});
+
+app.on('before-quit', () => {
+  isQuitting = true;
 });

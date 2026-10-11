@@ -1,0 +1,17 @@
+{
+  "name": "screenbridge-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "屏桥公网配对与即时截图中继",
+  "main": "relay.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node relay.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

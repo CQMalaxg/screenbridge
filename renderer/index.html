@@ -44,15 +44,18 @@
               <div class="empty-preview" id="emptyPreview">
                 <div class="capture-icon">⌁</div>
                 <strong>还没有截图</strong>
-                <span>点击按钮，或按 Ctrl + Shift + S</span>
+                <span>可连续添加多张截图，再一起分析</span>
               </div>
               <img id="screenPreview" alt="屏幕截图预览" />
             </div>
 
+            <div class="screenshot-gallery" id="screenshotGallery" aria-label="已添加的截图" hidden></div>
+
             <div class="action-row capture-actions">
-              <button class="primary-button" id="captureAnalyzeButton">截图并分析</button>
-              <button class="secondary-button" id="retryAnalyzeButton" disabled>用当前截图重试</button>
-              <button class="ghost-button" id="clearButton">清除</button>
+              <button class="secondary-button" id="addScreenshotButton">添加截图</button>
+              <button class="primary-button" id="analyzeScreenshotsButton" disabled>分析截图</button>
+              <button class="secondary-button" id="retryAnalyzeButton" disabled>重试分析</button>
+              <button class="ghost-button" id="clearButton" disabled>清除截图</button>
             </div>
           </section>
 
@@ -63,7 +66,16 @@
                 <h2>告诉模型怎么答</h2>
               </div>
             </div>
-            <textarea id="promptInput" rows="5">请阅读截图中的题目，先给出结论，再给出简洁、可直接使用的回答。若是编程题，请说明思路、复杂度和关键代码。</textarea>
+            <div class="prompt-preset-toolbar">
+              <select id="visionPromptPresetSelect" aria-label="回答提示词预设">
+                <option value="">选择预设</option>
+              </select>
+              <button class="icon-text-button" id="visionPromptPresetAddButton" type="button">新增</button>
+              <button class="icon-text-button" id="visionPromptPresetUpdateButton" type="button" disabled>更新</button>
+              <button class="icon-text-button danger-button" id="visionPromptPresetDeleteButton" type="button" disabled>删除</button>
+            </div>
+            <div class="prompt-preset-status" id="visionPromptPresetStatus" aria-live="polite"></div>
+            <textarea id="promptInput" rows="5">请阅读这些截图中的题目，先给出结论，再给出简洁、可直接使用的回答。若是编程题，请说明思路、复杂度和关键代码。</textarea>
             <div class="hint">建议只截取题目相关区域，图片越小，响应通常越快。</div>
           </section>
         </div>
@@ -86,6 +98,15 @@
             </div>
 
             <div class="composer">
+              <div class="prompt-preset-toolbar chat-prompt-preset-toolbar">
+                <select id="chatPromptPresetSelect" aria-label="追问提示词预设">
+                  <option value="">选择预设</option>
+                </select>
+                <button class="icon-text-button" id="chatPromptPresetAddButton" type="button">新增</button>
+                <button class="icon-text-button" id="chatPromptPresetUpdateButton" type="button" disabled>更新</button>
+                <button class="icon-text-button danger-button" id="chatPromptPresetDeleteButton" type="button" disabled>删除</button>
+              </div>
+              <div class="prompt-preset-status" id="chatPromptPresetStatus" aria-live="polite"></div>
               <textarea
                 id="chatInput"
                 rows="2"
@@ -95,7 +116,7 @@
               <div class="composer-row">
                 <label class="check-field composer-check">
                   <input id="attachImageInput" type="checkbox" />
-                  <span>附带当前截图</span>
+                  <span>附带当前截图批次</span>
                 </label>
                 <button class="primary-button" id="sendChatButton" disabled>发送追问</button>
                 <button class="ghost-button" id="stopButton" disabled>停止生成</button>
@@ -107,6 +128,24 @@
       </section>
 
       <section class="utility-grid">
+        <section class="card lan-card cloud-share-card">
+          <div class="section-heading">
+            <div>
+              <span class="step">WEB</span>
+              <h2>公网配对</h2>
+            </div>
+            <span class="muted" id="cloudPairStatus">未共享</span>
+          </div>
+          <p class="hint">给另一台电脑或平板浏览器使用。采集电脑主动连接服务器，配对后按需传送截图，不要求两台设备在同一局域网。</p>
+          <div class="lan-actions">
+            <button class="secondary-button" id="startCloudShareButton">创建配对码</button>
+            <button class="ghost-button" id="copyCloudCodeButton" disabled>复制配对信息</button>
+            <button class="ghost-button" id="stopCloudShareButton" disabled>停止共享</button>
+          </div>
+          <div class="share-info" id="cloudShareInfo">点击“创建配对码”，再在查看设备的浏览器中打开页面并输入配对码。</div>
+          <div class="hint">配对码需在 15 分钟内完成首次连接；连接成功后不会定时断开。关闭浏览器/采集端或网络中断后旧码失效，每组配对只允许一个查看设备。</div>
+        </section>
+
         <section class="card lan-card">
           <div class="section-heading">
             <div>
@@ -144,7 +183,7 @@
       </section>
 
       <footer class="footer-note">
-        当前版本支持单机截图、局域网共享端与助手端，并支持围绕回答进行多轮对话。
+        支持公网配对或局域网共享；每台采集电脑都需要运行屏桥应用。
       </footer>
     </main>
 
@@ -243,6 +282,25 @@
         </div>
       </div>
     </div>
+
+    <dialog class="prompt-preset-dialog" id="promptPresetDialog" aria-labelledby="promptPresetDialogTitle">
+      <form id="promptPresetDialogForm">
+        <h2 id="promptPresetDialogTitle">新增提示词预设</h2>
+        <label>
+          预设名称
+          <input id="promptPresetNameInput" type="text" maxlength="80" placeholder="例如：简洁回答" />
+        </label>
+        <label>
+          提示词内容
+          <textarea id="promptPresetTextInput" rows="6" placeholder="输入模型回答或追问时要使用的提示词"></textarea>
+        </label>
+        <div class="prompt-preset-dialog-status" id="promptPresetDialogStatus" aria-live="polite"></div>
+        <div class="prompt-preset-dialog-actions">
+          <button class="ghost-button" id="cancelPromptPresetButton" type="button">取消</button>
+          <button class="primary-button" type="submit">保存预设</button>
+        </div>
+      </form>
+    </dialog>
 
     <script src="./renderer.js"></script>
   </body>
