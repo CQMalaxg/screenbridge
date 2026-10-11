@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' https: http: wss:; img-src 'self' data: blob: http:; style-src 'self'; script-src 'self';"
+    />
+    <title>屏桥 ScreenBridge · 网页工作台</title>
+    <link rel="stylesheet" href="/viewer.css" />
+  </head>
+  <body>
+    <video id="screenMonitor" autoplay muted playsinline aria-hidden="true"></video>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="eyebrow">SCREENBRIDGE · REMOTE WORKSPACE</div>
+          <h1>屏幕工作台</h1>
+          <p class="subtitle">连接采集电脑，连续截取画面并交给模型分析。</p>
+        </div>
+        <nav class="topnav" aria-label="顶部导航">
+          <div class="model-chips">
+            <span class="chip" id="visionChip">视觉模型：未配置</span>
+            <span class="chip" id="chatChip">对话模型：未配置</span>
+          </div>
+          <div class="shortcut-pill" id="shortcutStatus">屏幕监听中</div>
+          <button class="nav-button" id="settingsButton" type="button">设置</button>
+        </nav>
+      </header>
+
+      <section class="card browser-pair-card" aria-labelledby="pairHeading">
+        <div class="section-heading">
+          <div>
+            <span class="step">连接</span>
+            <h2 id="pairHeading">采集电脑</h2>
+          </div>
+          <span class="pair-status" id="pairStatus" role="status" aria-live="polite">尚未连接</span>
+        </div>
+        <form class="browser-pair-form" id="pairForm">
+          <label class="pair-code-label" for="pairCodeInput">输入屏桥应用显示的配对码</label>
+          <div class="pair-code-controls">
+            <input id="pairCodeInput" inputmode="text" autocomplete="one-time-code" maxlength="9" placeholder="例如 ABCD-EFGH" aria-label="配对码" required />
+            <button class="primary-button" id="pairButton" type="submit">连接设备</button>
+            <button class="ghost-button" id="disconnectPairButton" type="button" hidden>断开</button>
+          </div>
+        </form>
+        <div class="hint">配对码需在 15 分钟内完成首次连接。连接成功后不会定时断开；关闭浏览器/采集端或网络中断后，需要用新配对码重新连接。连接后可连续添加多张截图，并自动同步采集端的完整设置（API 地址、协议、密钥、代理、模型、预设和提示词）。</div>
+      </section>
+
+      <section class="workspace">
+        <div class="left-column">
+          <section class="card capture-card">
+            <div class="section-heading">
+              <div>
+                <span class="step">01</span>
+                <h2>获取题目</h2>
+              </div>
+              <span class="muted" id="captureStatus">正在启动屏幕监听…</span>
+            </div>
+
+            <div class="preview-wrap" id="previewWrap">
+              <div class="empty-preview" id="emptyPreview">
+                <div class="capture-icon">⌁</div>
+                <strong>还没有截图</strong>
+                <span>可连续添加多张截图，再一起分析</span>
+              </div>
+              <img id="screenPreview" alt="屏幕截图预览" />
+            </div>
+
+            <div class="screenshot-gallery" id="screenshotGallery" aria-label="已添加的截图" hidden></div>
+
+            <div class="action-row capture-actions">
+              <button class="secondary-button" id="addScreenshotButton">添加截图</button>
+              <button class="primary-button" id="analyzeScreenshotsButton" disabled>分析截图</button>
+              <button class="secondary-button" id="retryAnalyzeButton" disabled>重试分析</button>
+              <button class="ghost-button" id="clearButton" disabled>清除截图</button>
+            </div>
+          </section>
+
+          <section class="card prompt-card">
+            <div class="section-heading">
+              <div>
+                <span class="step">02</span>
+                <h2>告诉模型怎么答</h2>
+              </div>
+            </div>
+            <div class="prompt-preset-toolbar">
+              <select id="visionPromptPresetSelect" aria-label="回答提示词预设">
+                <option value="">选择预设</option>
+              </select>
+              <button class="icon-text-button" id="visionPromptPresetAddButton" type="button">新增</button>
+              <button class="icon-text-button" id="visionPromptPresetUpdateButton" type="button" disabled>更新</button>
+              <button class="icon-text-button danger-button" id="visionPromptPresetDeleteButton" type="button" disabled>删除</button>
+            </div>
+            <div class="prompt-preset-status" id="visionPromptPresetStatus" aria-live="polite"></div>
+            <textarea id="promptInput" rows="5">请阅读这些截图中的题目，先给出结论，再给出简洁、可直接使用的回答。若是编程题，请说明思路、复杂度和关键代码。</textarea>
+            <div class="hint">建议只截取题目相关区域，图片越小，响应通常越快。</div>
+          </section>
+        </div>
+
+        <div class="right-column">
+          <section class="card answer-card">
+            <div class="section-heading">
+              <div>
+                <span class="step">03</span>
+                <h2>回答与多轮追问</h2>
+              </div>
+              <div class="heading-tools">
+                <button class="text-button" id="copyButton">复制</button>
+                <button class="text-button" id="clearChatButton">清空对话</button>
+              </div>
+            </div>
+
+            <div class="thread" id="thread">
+              <div class="thread-empty" id="threadEmpty">截图分析后，回答会显示在这里；随后可以针对回答继续追问。</div>
+            </div>
+
+            <div class="composer">
+              <div class="prompt-preset-toolbar chat-prompt-preset-toolbar">
+                <select id="chatPromptPresetSelect" aria-label="追问提示词预设">
+                  <option value="">选择预设</option>
+                </select>
+                <button class="icon-text-button" id="chatPromptPresetAddButton" type="button">新增</button>
+                <button class="icon-text-button" id="chatPromptPresetUpdateButton" type="button" disabled>更新</button>
+                <button class="icon-text-button danger-button" id="chatPromptPresetDeleteButton" type="button" disabled>删除</button>
+              </div>
+              <div class="prompt-preset-status" id="chatPromptPresetStatus" aria-live="polite"></div>
+              <textarea
+                id="chatInput"
+                rows="2"
+                placeholder="针对上面的回答继续追问…（Ctrl + Enter 发送）"
+                disabled
+              ></textarea>
+              <div class="composer-row">
+                <label class="check-field composer-check">
+                  <input id="attachImageInput" type="checkbox" />
+                  <span>附带当前截图批次</span>
+                </label>
+                <button class="primary-button" id="sendChatButton" disabled>发送追问</button>
+                <button class="ghost-button" id="stopButton" disabled>停止生成</button>
+              </div>
+              <div class="hint" id="chatHint">完成一次截图分析后即可开始追问，追问由“对话模型”处理。</div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="utility-grid">
+        <section class="card lan-card cloud-share-card">
+          <div class="section-heading">
+            <div>
+              <span class="step">WEB</span>
+              <h2>公网配对</h2>
+            </div>
+            <span class="muted" id="cloudPairStatus">未共享</span>
+          </div>
+          <p class="hint">给另一台电脑或平板浏览器使用。采集电脑主动连接服务器，配对后按需传送截图，不要求两台设备在同一局域网。</p>
+          <div class="lan-actions">
+            <button class="secondary-button" id="startCloudShareButton">创建配对码</button>
+            <button class="ghost-button" id="copyCloudCodeButton" disabled>复制配对信息</button>
+            <button class="ghost-button" id="stopCloudShareButton" disabled>停止共享</button>
+          </div>
+          <div class="share-info" id="cloudShareInfo">点击“创建配对码”，再在查看设备的浏览器中打开页面并输入配对码。</div>
+          <div class="hint">配对码需在 15 分钟内完成首次连接；连接成功后不会定时断开。关闭浏览器/采集端或网络中断后旧码失效，每组配对只允许一个查看设备。</div>
+        </section>
+
+        <section class="card lan-card">
+          <div class="section-heading">
+            <div>
+              <span class="step">LAN</span>
+              <h2>远程屏幕</h2>
+            </div>
+            <span class="muted" id="lanStatus">未连接</span>
+          </div>
+          <div class="lan-actions">
+            <button class="secondary-button" id="startShareButton">启动共享端</button>
+            <button class="ghost-button" id="minimizeShareButton" disabled>最小化共享端</button>
+          </div>
+          <div class="share-info" id="shareInfo">在题目所在电脑启动共享端，然后把地址和配对码填到另一台电脑。</div>
+          <div class="discovery-row">
+            <select id="discoveredDeviceSelect" aria-label="选择发现的共享设备">
+              <option value="">发现的共享设备</option>
+            </select>
+            <button class="ghost-button" id="discoverDevicesButton" type="button">搜索设备</button>
+          </div>
+          <div class="hint discovery-status" id="discoveryStatus" aria-live="polite"></div>
+          <label>
+            远程设备地址
+            <input id="remoteUrlInput" type="url" placeholder="http://192.168.1.20:8765" />
+          </label>
+          <label>
+            配对码
+            <input id="remoteTokenInput" type="text" placeholder="例如 7F2A91C0" autocomplete="off" />
+          </label>
+          <div class="action-row">
+            <button class="primary-button" id="connectRemoteButton">连接远程屏幕</button>
+            <button class="ghost-button" id="disconnectRemoteButton" disabled>断开</button>
+          </div>
+          <div class="hint">局域网模式要求两台设备在同一网络。共享端启动后建议最小化窗口，避免把共享端 App 自己录进去；连接后会持续读取采集端完整配置，网页设置会变为只读。</div>
+        </section>
+      </section>
+
+      <footer class="footer-note">
+        未连接采集端时，模型地址、协议、密钥、代理、模型和提示词由当前浏览器管理；连接采集端后自动使用采集端同步的完整配置并锁定网页设置。API Key 通过已建立的配对连接同步，模型请求仍由浏览器直接发送。
+      </footer>
+    </main>
+
+    <div class="modal-backdrop" id="settingsModal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="modal-head">
+          <div>
+            <span class="step">设置</span>
+            <h2 id="settingsTitle">模型设置</h2>
+          </div>
+          <button class="ghost-button" id="closeSettingsButton" type="button">关闭</button>
+        </div>
+
+        <div class="modal-tabs" id="settingsTabs">
+          <button class="tab-button is-active" type="button" data-group="vision">视觉模型</button>
+          <button class="tab-button" type="button" data-group="chat">对话模型</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="hint tab-hint" id="tabHint"></div>
+
+          <div class="preset-toolbar">
+            <select id="stPresetSelect" aria-label="编辑模型预设"></select>
+            <button class="icon-text-button" id="stAddPresetButton" type="button">新增</button>
+            <button class="icon-text-button danger-button" id="stDeletePresetButton" type="button">删除</button>
+          </div>
+          <label class="check-field primary-preset-field">
+            <input id="stPrimaryPresetInput" type="radio" name="primaryPreset" />
+            <span id="stPrimaryPresetLabel">设为主用模型</span>
+          </label>
+          <label>
+            预设名称
+            <input id="stPresetNameInput" type="text" placeholder="例如 主力模型" />
+          </label>
+          <div class="settings-row">
+            <label>
+              请求优先级
+              <input id="stPriorityInput" type="number" min="1" max="999" step="1" />
+            </label>
+            <label class="check-field">
+              <input id="stPresetEnabledInput" type="checkbox" />
+              <span>参与自动切换</span>
+            </label>
+          </div>
+          <label>
+            API 地址
+            <input id="stBaseUrlInput" type="url" placeholder="https://api.example.com/v1" />
+          </label>
+          <label>
+            API 协议
+            <select id="stApiBackendInput">
+              <option value="responses">Responses API</option>
+              <option value="chat_completions">Chat Completions</option>
+            </select>
+          </label>
+          <label>
+            模型名称
+            <input id="stModelInput" type="text" placeholder="输入服务端提供的模型名称" />
+          </label>
+          <label>
+            API Key <span class="optional">可选，本地模型可留空</span>
+            <input id="stApiKeyInput" type="password" placeholder="sk-..." autocomplete="off" />
+          </label>
+          <label class="browser-proxy-setting">
+            HTTP 代理
+            <input id="stProxyUrlInput" type="text" placeholder="使用当前设备的浏览器/系统代理" disabled />
+            <span class="optional">浏览器不能为单个模型单独设置代理。</span>
+          </label>
+          <label class="check-field browser-key-setting">
+            <input id="stRememberApiKeyInput" type="checkbox" />
+            <span>在此浏览器记住当前预设的 API Key</span>
+          </label>
+
+          <div class="prompt-field" id="stVisionPromptField">
+            <label>
+              视觉模型系统提示词
+              <textarea id="stSystemPromptInput" rows="3"></textarea>
+            </label>
+          </div>
+          <div class="prompt-field" id="stChatPromptField" hidden>
+            <label>
+              对话模型系统提示词
+              <textarea id="stChatSystemPromptInput" rows="3"></textarea>
+            </label>
+            <div class="hint">追问时，截图与上一轮回答会作为上下文一起发送。</div>
+          </div>
+
+          <label class="check-field auto-fallback-field">
+            <input id="stAutoFallbackInput" type="checkbox" />
+            <span>请求失败时按优先级自动尝试同组其他已启用预设</span>
+          </label>
+          <div class="security-note">网页复用桌面端模型与提示词流程。连接采集端后，API 地址、协议、密钥、代理、模型、预设、主用项、优先级、启用状态、自动切换、系统提示词和回答/追问提示词预设都会同步显示，设置保持只读。密钥仅通过已建立的配对连接传输，不写入中继磁盘；模型请求直接发给模型服务，不经过屏桥服务器。未连接采集端时，密钥默认只保留在当前页面；勾选后存入此浏览器。HTTP 代理请使用此设备的浏览器/系统网络设置。</div>
+        </div>
+
+        <div class="modal-foot">
+          <span class="muted" id="saveStatus">本地保存</span>
+          <div class="modal-foot-actions">
+            <button class="ghost-button" id="cancelSettingsButton" type="button">取消</button>
+            <button class="primary-button" id="saveButton" type="button">保存设置</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <dialog class="prompt-preset-dialog" id="promptPresetDialog" aria-labelledby="promptPresetDialogTitle">
+      <form id="promptPresetDialogForm">
+        <h2 id="promptPresetDialogTitle">新增提示词预设</h2>
+        <label>
+          预设名称
+          <input id="promptPresetNameInput" type="text" maxlength="80" placeholder="例如：简洁回答" />
+        </label>
+        <label>
+          提示词内容
+          <textarea id="promptPresetTextInput" rows="6" placeholder="输入模型回答或追问时要使用的提示词"></textarea>
+        </label>
+        <div class="prompt-preset-dialog-status" id="promptPresetDialogStatus" aria-live="polite"></div>
+        <div class="prompt-preset-dialog-actions">
+          <button class="ghost-button" id="cancelPromptPresetButton" type="button">取消</button>
+          <button class="primary-button" type="submit">保存预设</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/viewer.js"></script>
+    <script src="/workbench.js"></script>
+  </body>
+</html>

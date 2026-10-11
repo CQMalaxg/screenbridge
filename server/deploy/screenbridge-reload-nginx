@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+if [ "${RENEWED_LINEAGE:-}" != "/opt/screenbridge/letsencrypt/config/live/screenbridge.zahml.top" ]; then
+    exit 0
+fi
+
+/www/server/nginx/sbin/nginx -t
+/www/server/nginx/sbin/nginx -s reload

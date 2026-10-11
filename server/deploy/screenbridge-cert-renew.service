@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew ScreenBridge TLS certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/screenbridge/certbot-venv/bin/certbot renew --quiet --config-dir /opt/screenbridge/letsencrypt/config --work-dir /opt/screenbridge/letsencrypt/work --logs-dir /opt/screenbridge/letsencrypt/logs --deploy-hook /opt/screenbridge/server/deploy/screenbridge-reload-nginx

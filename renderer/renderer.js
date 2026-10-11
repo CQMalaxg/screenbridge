@@ -1,7 +1,8 @@
 const api = window.assistantAPI;
 
 const elements = {
-  captureAnalyzeButton: document.getElementById('captureAnalyzeButton'),
+  addScreenshotButton: document.getElementById('addScreenshotButton'),
+  analyzeScreenshotsButton: document.getElementById('analyzeScreenshotsButton'),
   retryAnalyzeButton: document.getElementById('retryAnalyzeButton'),
   clearButton: document.getElementById('clearButton'),
   stopButton: document.getElementById('stopButton'),
@@ -10,12 +11,23 @@ const elements = {
   screenMonitor: document.getElementById('screenMonitor'),
   screenPreview: document.getElementById('screenPreview'),
   previewWrap: document.getElementById('previewWrap'),
+  screenshotGallery: document.getElementById('screenshotGallery'),
   promptInput: document.getElementById('promptInput'),
+  visionPromptPresetSelect: document.getElementById('visionPromptPresetSelect'),
+  visionPromptPresetAddButton: document.getElementById('visionPromptPresetAddButton'),
+  visionPromptPresetUpdateButton: document.getElementById('visionPromptPresetUpdateButton'),
+  visionPromptPresetDeleteButton: document.getElementById('visionPromptPresetDeleteButton'),
+  visionPromptPresetStatus: document.getElementById('visionPromptPresetStatus'),
   captureStatus: document.getElementById('captureStatus'),
   shortcutStatus: document.getElementById('shortcutStatus'),
   thread: document.getElementById('thread'),
   threadEmpty: document.getElementById('threadEmpty'),
   chatInput: document.getElementById('chatInput'),
+  chatPromptPresetSelect: document.getElementById('chatPromptPresetSelect'),
+  chatPromptPresetAddButton: document.getElementById('chatPromptPresetAddButton'),
+  chatPromptPresetUpdateButton: document.getElementById('chatPromptPresetUpdateButton'),
+  chatPromptPresetDeleteButton: document.getElementById('chatPromptPresetDeleteButton'),
+  chatPromptPresetStatus: document.getElementById('chatPromptPresetStatus'),
   chatHint: document.getElementById('chatHint'),
   sendChatButton: document.getElementById('sendChatButton'),
   attachImageInput: document.getElementById('attachImageInput'),
@@ -48,6 +60,11 @@ const elements = {
   stVisionPromptField: document.getElementById('stVisionPromptField'),
   stChatPromptField: document.getElementById('stChatPromptField'),
   startShareButton: document.getElementById('startShareButton'),
+  startCloudShareButton: document.getElementById('startCloudShareButton'),
+  copyCloudCodeButton: document.getElementById('copyCloudCodeButton'),
+  stopCloudShareButton: document.getElementById('stopCloudShareButton'),
+  cloudPairStatus: document.getElementById('cloudPairStatus'),
+  cloudShareInfo: document.getElementById('cloudShareInfo'),
   minimizeShareButton: document.getElementById('minimizeShareButton'),
   lanStatus: document.getElementById('lanStatus'),
   shareInfo: document.getElementById('shareInfo'),
@@ -60,12 +77,21 @@ const elements = {
   disconnectRemoteButton: document.getElementById('disconnectRemoteButton')
 };
 
+const promptPresetDialog = document.getElementById('promptPresetDialog');
+const promptPresetDialogForm = document.getElementById('promptPresetDialogForm');
+const promptPresetNameInput = document.getElementById('promptPresetNameInput');
+const promptPresetTextInput = document.getElementById('promptPresetTextInput');
+const promptPresetDialogStatus = document.getElementById('promptPresetDialogStatus');
+const promptPresetDialogTitle = document.getElementById('promptPresetDialogTitle');
+const cancelPromptPresetButton = document.getElementById('cancelPromptPresetButton');
+
 const groupLabels = {
   vision: { name: '视觉模型', hint: '用于读取截图并给出第一版回答。要求模型支持图片输入。' },
   chat: { name: '对话模型', hint: '用于针对已给出的回答继续多轮追问。默认只发送文本上下文，可勾选附带截图。' }
 };
 
-let currentImageDataUrl = '';
+let currentScreenshots = [];
+let selectedScreenshotIndex = -1;
 let screenStream = null;
 let monitorStarted = false;
 let isGenerating = false;
@@ -79,7 +105,11 @@ let appConfig = null;
 let settingsConfig = null;
 let settingsGroup = 'vision';
 let editingPresetId = '';
+const selectedPromptPresetIds = { vision: '', chat: '' };
+let pendingPromptPresetGroup = '';
+let promptPresetSaving = false;
 let discoveredDevices = [];
+let currentCloudPairInfo = null;
 let thread = [];
 let messageNodes = [];
 let streamingIndex = -1;
@@ -308,8 +338,10 @@ function buildChatHistory() {
 function setGenerating(value, kind = '') {
   isGenerating = value;
   generatingKind = value ? kind : '';
-  elements.captureAnalyzeButton.disabled = value;
-  elements.retryAnalyzeButton.disabled = value || !currentImageDataUrl;
+  elements.addScreenshotButton.disabled = value;
+  elements.analyzeScreenshotsButton.disabled = value || currentScreenshots.length === 0;
+  elements.retryAnalyzeButton.disabled = value || currentScreenshots.length === 0;
+  elements.clearButton.disabled = value || currentScreenshots.length === 0;
   elements.stopButton.disabled = !value;
   updateComposerState();
 }
@@ -318,7 +350,7 @@ function updateComposerState() {
   const ready = hasAnswer() && !isGenerating;
   elements.chatInput.disabled = !ready;
   elements.sendChatButton.disabled = !ready;
-  elements.attachImageInput.disabled = !ready || !currentImageDataUrl;
+  elements.attachImageInput.disabled = !ready || currentScreenshots.length === 0;
   if (!isGenerating) {
     elements.chatHint.textContent = hasAnswer()
       ? '追问由“对话模型”处理，会带上本轮对话上下文。'
@@ -370,7 +402,15 @@ function normalizeConfig(config) {
     systemPrompt: config.systemPrompt || '',
     chatSystemPrompt: config.chatSystemPrompt || '',
     vision: build(config.vision, 'vision'),
-    chat: build(config.chat, 'chat')
+    chat: build(config.chat, 'chat'),
+    promptPresets: {
+      vision: Array.isArray(config.promptPresets && config.promptPresets.vision)
+        ? config.promptPresets.vision.map((preset) => ({ ...preset }))
+        : [],
+      chat: Array.isArray(config.promptPresets && config.promptPresets.chat)
+        ? config.promptPresets.chat.map((preset) => ({ ...preset }))
+        : []
+    }
   };
 }
 
@@ -387,6 +427,10 @@ function cloneConfig(config) {
     chat: {
       activePresetId: config.chat.activePresetId,
       presets: config.chat.presets.map((preset) => ({ ...preset }))
+    },
+    promptPresets: {
+      vision: config.promptPresets.vision.map((preset) => ({ ...preset })),
+      chat: config.promptPresets.chat.map((preset) => ({ ...preset }))
     }
   };
 }
@@ -405,8 +449,147 @@ function updateModelChips() {
 
 function loadConfig(config) {
   appConfig = normalizeConfig(config);
+  for (const group of ['vision', 'chat']) {
+    if (!appConfig.promptPresets[group].some((preset) => preset.id === selectedPromptPresetIds[group])) {
+      selectedPromptPresetIds[group] = '';
+    }
+    renderPromptPresetToolbar(group);
+  }
   updateModelChips();
   updateComposerState();
+}
+
+function promptPresetElements(group) {
+  return group === 'vision'
+    ? {
+        select: elements.visionPromptPresetSelect,
+        add: elements.visionPromptPresetAddButton,
+        update: elements.visionPromptPresetUpdateButton,
+        remove: elements.visionPromptPresetDeleteButton,
+        status: elements.visionPromptPresetStatus,
+        input: elements.promptInput
+      }
+    : {
+        select: elements.chatPromptPresetSelect,
+        add: elements.chatPromptPresetAddButton,
+        update: elements.chatPromptPresetUpdateButton,
+        remove: elements.chatPromptPresetDeleteButton,
+        status: elements.chatPromptPresetStatus,
+        input: elements.chatInput
+      };
+}
+
+function renderPromptPresetToolbar(group) {
+  if (!appConfig) return;
+  const controls = promptPresetElements(group);
+  const presets = appConfig.promptPresets[group];
+  const selectedId = presets.some((preset) => preset.id === selectedPromptPresetIds[group])
+    ? selectedPromptPresetIds[group]
+    : '';
+  selectedPromptPresetIds[group] = selectedId;
+  controls.select.innerHTML = '<option value="">选择预设</option>' + presets
+    .map((preset) => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)}</option>`)
+    .join('');
+  controls.select.value = selectedId;
+  controls.select.disabled = promptPresetSaving;
+  controls.add.disabled = promptPresetSaving;
+  controls.update.disabled = promptPresetSaving || !selectedId;
+  controls.remove.disabled = promptPresetSaving || !selectedId;
+}
+
+function selectPromptPreset(group, presetId) {
+  const controls = promptPresetElements(group);
+  const preset = appConfig.promptPresets[group].find((item) => item.id === presetId);
+  selectedPromptPresetIds[group] = preset ? preset.id : '';
+  if (preset) controls.input.value = preset.text;
+  controls.status.textContent = preset ? `已载入「${preset.name}」` : '';
+  renderPromptPresetToolbar(group);
+}
+
+function setPromptPresetSaving(saving, group) {
+  promptPresetSaving = saving;
+  for (const name of ['vision', 'chat']) renderPromptPresetToolbar(name);
+  if (group) promptPresetElements(group).status.textContent = saving ? '正在保存…' : '';
+}
+
+async function persistPromptPresetList(group, presets, selectedId, successMessage) {
+  if (!appConfig || promptPresetSaving) return false;
+  const controls = promptPresetElements(group);
+  const nextConfig = cloneConfig(appConfig);
+  nextConfig.promptPresets[group] = presets;
+  setPromptPresetSaving(true, group);
+  try {
+    const saved = await api.saveConfig(nextConfig);
+    selectedPromptPresetIds[group] = selectedId;
+    loadConfig(saved);
+    controls.status.textContent = successMessage;
+    return true;
+  } catch (error) {
+    controls.status.textContent = error.message || '保存失败';
+    return false;
+  } finally {
+    setPromptPresetSaving(false);
+  }
+}
+
+function openPromptPresetDialog(group) {
+  pendingPromptPresetGroup = group;
+  promptPresetDialogTitle.textContent = group === 'vision' ? '新增回答预设' : '新增追问预设';
+  promptPresetNameInput.value = '';
+  promptPresetTextInput.value = promptPresetElements(group).input.value;
+  promptPresetDialogStatus.textContent = '';
+  promptPresetDialog.showModal();
+  promptPresetNameInput.focus();
+}
+
+async function createPromptPreset(event) {
+  event.preventDefault();
+  if (!pendingPromptPresetGroup || promptPresetSaving) return;
+  const group = pendingPromptPresetGroup;
+  const controls = promptPresetElements(group);
+  const name = promptPresetNameInput.value.trim();
+  const text = promptPresetTextInput.value;
+  if (!name) {
+    promptPresetDialogStatus.textContent = '请填写预设名称。';
+    promptPresetNameInput.focus();
+    return;
+  }
+  if (!text.trim()) {
+    promptPresetDialogStatus.textContent = '请先填写提示词内容，再保存预设。';
+    return;
+  }
+
+  const preset = { id: createPresetId(), name, text };
+  const presets = [...appConfig.promptPresets[group], preset];
+  const saved = await persistPromptPresetList(group, presets, preset.id, `已新增「${name}」`);
+  if (saved) {
+    controls.input.value = text;
+    promptPresetDialog.close();
+    pendingPromptPresetGroup = '';
+  } else {
+    promptPresetDialogStatus.textContent = promptPresetElements(group).status.textContent;
+  }
+}
+
+async function updatePromptPreset(group) {
+  const presetId = selectedPromptPresetIds[group];
+  const existing = appConfig.promptPresets[group].find((preset) => preset.id === presetId);
+  if (!existing) return;
+  const controls = promptPresetElements(group);
+  const presets = appConfig.promptPresets[group].map((preset) => (
+    preset.id === presetId ? { ...preset, text: controls.input.value } : { ...preset }
+  ));
+  await persistPromptPresetList(group, presets, presetId, `已更新「${existing.name}」`);
+}
+
+async function deletePromptPreset(group) {
+  const presetId = selectedPromptPresetIds[group];
+  const existing = appConfig.promptPresets[group].find((preset) => preset.id === presetId);
+  if (!existing || !window.confirm(`删除提示词预设「${existing.name}」？`)) return;
+  const presets = appConfig.promptPresets[group]
+    .filter((preset) => preset.id !== presetId)
+    .map((preset) => ({ ...preset }));
+  await persistPromptPresetList(group, presets, '', `已删除「${existing.name}」`);
 }
 
 function settingsGroupData() {
@@ -573,15 +756,79 @@ function compressImage(dataUrl) {
   });
 }
 
-function receiveScreenshot(dataUrl) {
+function renderScreenshotBatch() {
+  const hasScreenshots = currentScreenshots.length > 0;
+  if (!hasScreenshots) {
+    selectedScreenshotIndex = -1;
+    elements.screenPreview.removeAttribute('src');
+    elements.previewWrap.classList.remove('has-image');
+  } else {
+    selectedScreenshotIndex = Math.min(Math.max(selectedScreenshotIndex, 0), currentScreenshots.length - 1);
+    elements.screenPreview.src = currentScreenshots[selectedScreenshotIndex];
+    elements.screenPreview.alt = `第 ${selectedScreenshotIndex + 1} 张屏幕截图预览`;
+    elements.previewWrap.classList.add('has-image');
+  }
+
+  elements.screenshotGallery.replaceChildren();
+  elements.screenshotGallery.hidden = !hasScreenshots;
+  currentScreenshots.forEach((dataUrl, index) => {
+    const item = document.createElement('div');
+    item.className = 'screenshot-item';
+
+    const selectButton = document.createElement('button');
+    selectButton.type = 'button';
+    selectButton.className = `screenshot-select${index === selectedScreenshotIndex ? ' is-active' : ''}`;
+    selectButton.dataset.selectIndex = String(index);
+    selectButton.setAttribute('aria-label', `预览第 ${index + 1} 张截图`);
+    selectButton.setAttribute('aria-pressed', String(index === selectedScreenshotIndex));
+    const thumbnail = document.createElement('img');
+    thumbnail.src = dataUrl;
+    thumbnail.alt = '';
+    selectButton.append(thumbnail);
+
+    const number = document.createElement('span');
+    number.className = 'screenshot-number';
+    number.textContent = String(index + 1);
+
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.className = 'screenshot-remove';
+    removeButton.dataset.removeIndex = String(index);
+    removeButton.setAttribute('aria-label', `删除第 ${index + 1} 张截图`);
+    removeButton.textContent = '×';
+
+    item.append(selectButton, number, removeButton);
+    elements.screenshotGallery.append(item);
+  });
+
+  elements.analyzeScreenshotsButton.textContent = hasScreenshots
+    ? `分析 ${currentScreenshots.length} 张截图`
+    : '分析截图';
+  elements.analyzeScreenshotsButton.disabled = isGenerating || !hasScreenshots;
+  elements.retryAnalyzeButton.disabled = isGenerating || !hasScreenshots;
+  elements.clearButton.disabled = isGenerating || !hasScreenshots;
+  updateComposerState();
+}
+
+function addScreenshot(dataUrl) {
   if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
     throw new Error('截图数据无效');
   }
-  currentImageDataUrl = dataUrl;
-  elements.screenPreview.src = dataUrl;
-  elements.previewWrap.classList.add('has-image');
-  elements.retryAnalyzeButton.disabled = isGenerating;
-  setCaptureStatus('已截图，准备分析');
+  currentScreenshots.push(dataUrl);
+  selectedScreenshotIndex = currentScreenshots.length - 1;
+  renderScreenshotBatch();
+  setCaptureStatus(`已添加 ${currentScreenshots.length} 张截图，可统一分析`);
+}
+
+function removeScreenshot(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= currentScreenshots.length) return;
+  currentScreenshots.splice(index, 1);
+  if (index < selectedScreenshotIndex) selectedScreenshotIndex -= 1;
+  else if (index === selectedScreenshotIndex) selectedScreenshotIndex = Math.min(index, currentScreenshots.length - 1);
+  renderScreenshotBatch();
+  setCaptureStatus(currentScreenshots.length
+    ? `已移除截图，剩余 ${currentScreenshots.length} 张`
+    : '截图已清空');
 }
 
 async function startScreenMonitor() {
@@ -608,7 +855,7 @@ async function startScreenMonitor() {
     await elements.screenMonitor.play();
     monitorStarted = true;
     elements.shortcutStatus.textContent = '屏幕监听中 · 点击按钮分析';
-    setCaptureStatus('屏幕监听中，点击“截图并分析”');
+    setCaptureStatus('屏幕监听中，可连续添加截图后分析');
   } catch (error) {
     monitorStarted = false;
     elements.shortcutStatus.textContent = '监听启动失败，将使用单次截图';
@@ -667,8 +914,10 @@ async function pollRemotePreview() {
   remotePolling = true;
   try {
     const dataUrl = await fetchRemoteFrameData();
-    elements.screenPreview.src = dataUrl;
-    elements.previewWrap.classList.add('has-image');
+    if (currentScreenshots.length === 0) {
+      elements.screenPreview.src = dataUrl;
+      elements.previewWrap.classList.add('has-image');
+    }
     setLanStatus('已连接 · 远程画面监控中');
   } catch (error) {
     setLanStatus(error.message || '远程画面连接失败', true);
@@ -789,17 +1038,17 @@ async function captureCurrentScreen() {
 
 /* ---------- analysis & follow-up ---------- */
 
-async function analyzeScreenshot(screenshot) {
-  if (typeof screenshot !== 'string' || !screenshot.startsWith('data:image/')) {
-    throw new Error('没有获取到有效截图，请重试');
+async function analyzeScreenshots(screenshots = currentScreenshots) {
+  if (!Array.isArray(screenshots) || screenshots.length === 0
+      || screenshots.some((screenshot) => typeof screenshot !== 'string' || !screenshot.startsWith('data:image/'))) {
+    throw new Error('没有有效截图，请重新添加后重试');
   }
-  receiveScreenshot(screenshot);
-  const prompt = elements.promptInput.value.trim() || '请分析这张截图并给出回答。';
-  const imageDataUrl = await compressImage(screenshot);
+  const prompt = elements.promptInput.value.trim() || '请分析这些截图并给出回答。';
+  const imageDataUrls = await Promise.all(screenshots.map(compressImage));
 
   thread = [];
   renderThread();
-  pushMessage({ role: 'user', content: prompt, meta: '截图提问' });
+  pushMessage({ role: 'user', content: prompt, meta: `截图提问 · ${screenshots.length} 张` });
   streamingIndex = pushMessage({
     role: 'assistant',
     content: '',
@@ -811,32 +1060,102 @@ async function analyzeScreenshot(screenshot) {
   setGenerating(true, 'vision');
   setCaptureStatus('正在分析…');
   await api.analyzeImage({
-    imageDataUrl,
+    imageDataUrls,
     prompt,
     presetId: appConfig.vision.activePresetId
   });
 }
 
-async function captureAndAnalyze() {
+async function startCloudShare() {
+  elements.startCloudShareButton.disabled = true;
+  try {
+    currentCloudPairInfo = await api.startCloudShare();
+    elements.cloudShareInfo.textContent =
+      `查看页面：${currentCloudPairInfo.viewerUrl}\n配对码：${currentCloudPairInfo.code}\n首次连接截止：${new Date(currentCloudPairInfo.expiresAt).toLocaleString()}`;
+    elements.copyCloudCodeButton.disabled = false;
+    elements.stopCloudShareButton.disabled = false;
+    elements.cloudPairStatus.textContent = '配对码已生成，正在连接…';
+  } catch (error) {
+    elements.cloudPairStatus.textContent = error.message || '创建配对码失败';
+    elements.cloudPairStatus.classList.add('is-error');
+    elements.startCloudShareButton.disabled = false;
+  }
+}
+
+async function stopCloudShare() {
+  await api.stopCloudShare();
+  currentCloudPairInfo = null;
+  elements.cloudShareInfo.textContent = '点击“创建配对码”，再在查看设备的浏览器中打开页面并输入配对码。';
+  elements.startCloudShareButton.disabled = false;
+  elements.copyCloudCodeButton.disabled = true;
+  elements.stopCloudShareButton.disabled = true;
+}
+
+async function copyCloudPairInfo() {
+  if (!currentCloudPairInfo) return;
+  await api.copyText(`查看页面：${currentCloudPairInfo.viewerUrl}\n配对码：${currentCloudPairInfo.code}`);
+  elements.cloudPairStatus.textContent = '配对信息已复制';
+}
+
+api.onCloudShareStatus((status) => {
+  if (!status || !elements.cloudPairStatus) return;
+  elements.cloudPairStatus.textContent = status.message || status.state;
+  elements.cloudPairStatus.classList.toggle('is-error', status.state === 'error' || status.state === 'expired' || status.state === 'disconnected');
+  if (status.state === 'expired') {
+    currentCloudPairInfo = null;
+    elements.cloudShareInfo.textContent = '配对码已失效。点击“创建配对码”开始新的共享。';
+    elements.startCloudShareButton.disabled = false;
+    elements.copyCloudCodeButton.disabled = true;
+    elements.stopCloudShareButton.disabled = true;
+  } else if (status.state === 'paired') {
+    if (currentCloudPairInfo) {
+      elements.cloudShareInfo.textContent = `查看页面：${currentCloudPairInfo.viewerUrl}\n首次配对已完成，心跳保活中；浏览器/采集端或网络断开后旧码失效。`;
+    }
+    elements.copyCloudCodeButton.disabled = true;
+  } else if (status.state === 'disconnected') {
+    currentCloudPairInfo = null;
+    elements.cloudShareInfo.textContent = '连接已结束，旧配对码已失效。点击“创建配对码”开始新的共享。';
+    elements.startCloudShareButton.disabled = false;
+    elements.copyCloudCodeButton.disabled = true;
+    elements.stopCloudShareButton.disabled = true;
+  } else if (status.state === 'stopped') {
+    currentCloudPairInfo = null;
+    elements.startCloudShareButton.disabled = false;
+    elements.copyCloudCodeButton.disabled = true;
+    elements.stopCloudShareButton.disabled = true;
+  }
+});
+
+async function captureScreenshot() {
   if (isGenerating) return;
 
   try {
-    setCaptureStatus('正在获取当前屏幕…');
+    setCaptureStatus('正在截取当前屏幕…');
     const screenshot = await captureCurrentScreen();
-    await analyzeScreenshot(screenshot);
+    addScreenshot(screenshot);
+  } catch (error) {
+    setCaptureStatus(`添加截图失败：${error.message || error}`, true);
+    if (remoteConnected) setLanStatus(error.message || '远程屏幕连接失败', true);
+  }
+}
+
+async function analyzeScreenshotBatch() {
+  if (isGenerating || currentScreenshots.length === 0) return;
+
+  try {
+    await analyzeScreenshots();
   } catch (error) {
     setGenerating(false);
     setCaptureStatus('分析失败', true);
-    if (remoteConnected) setLanStatus(error.message || '远程屏幕连接失败', true);
     failStreaming(streamingIndex, `分析失败：\n${error.message || error}`, '视觉模型');
     streamingIndex = -1;
   }
 }
 
-async function retryCurrentScreenshot() {
-  if (isGenerating || !currentImageDataUrl) return;
+async function retryScreenshotBatch() {
+  if (isGenerating || currentScreenshots.length === 0) return;
   try {
-    await analyzeScreenshot(currentImageDataUrl);
+    await analyzeScreenshots();
   } catch (error) {
     setGenerating(false);
     setCaptureStatus('分析失败', true);
@@ -854,6 +1173,8 @@ async function sendFollowUp() {
   }
 
   elements.chatInput.value = '';
+  selectedPromptPresetIds.chat = '';
+  renderPromptPresetToolbar('chat');
   pushMessage({ role: 'user', content: text, meta: '追问' });
   const history = buildChatHistory();
 
@@ -870,21 +1191,20 @@ async function sendFollowUp() {
   elements.chatHint.textContent = '正在生成回答…';
   scrollThreadToBottom();
 
-  const attachImage = elements.attachImageInput.checked && currentImageDataUrl;
+  const attachImages = elements.attachImageInput.checked && currentScreenshots.length > 0;
   await api.chatFollowUp({
     history,
-    imageDataUrl: attachImage ? await compressImage(currentImageDataUrl) : '',
+    imageDataUrls: attachImages ? await Promise.all(currentScreenshots.map(compressImage)) : [],
     presetId: appConfig.chat.activePresetId
   });
 }
 
 function clearAll() {
-  currentImageDataUrl = '';
-  elements.screenPreview.removeAttribute('src');
-  elements.previewWrap.classList.remove('has-image');
-  elements.retryAnalyzeButton.disabled = true;
-  setCaptureStatus(remoteConnected ? '远程屏幕连接中' : (monitorStarted ? '屏幕监听中，点击“截图并分析”' : '等待截图'));
-  updateComposerState();
+  if (isGenerating) return;
+  currentScreenshots = [];
+  selectedScreenshotIndex = -1;
+  renderScreenshotBatch();
+  setCaptureStatus(remoteConnected ? '远程屏幕连接中' : (monitorStarted ? '屏幕监听中，可添加截图' : '等待截图'));
 }
 
 function clearThread() {
@@ -896,11 +1216,27 @@ function clearThread() {
 
 /* ---------- events ---------- */
 
-elements.captureAnalyzeButton.addEventListener('click', captureAndAnalyze);
-elements.retryAnalyzeButton.addEventListener('click', retryCurrentScreenshot);
+elements.addScreenshotButton.addEventListener('click', captureScreenshot);
+elements.analyzeScreenshotsButton.addEventListener('click', analyzeScreenshotBatch);
+elements.retryAnalyzeButton.addEventListener('click', retryScreenshotBatch);
 elements.clearButton.addEventListener('click', clearAll);
+elements.screenshotGallery.addEventListener('click', (event) => {
+  const removeButton = event.target.closest('[data-remove-index]');
+  if (removeButton) {
+    removeScreenshot(Number(removeButton.dataset.removeIndex));
+    return;
+  }
+
+  const selectButton = event.target.closest('[data-select-index]');
+  if (!selectButton) return;
+  selectedScreenshotIndex = Number(selectButton.dataset.selectIndex);
+  renderScreenshotBatch();
+});
 elements.clearChatButton.addEventListener('click', clearThread);
 elements.startShareButton.addEventListener('click', startShare);
+elements.startCloudShareButton.addEventListener('click', startCloudShare);
+elements.copyCloudCodeButton.addEventListener('click', copyCloudPairInfo);
+elements.stopCloudShareButton.addEventListener('click', stopCloudShare);
 elements.minimizeShareButton.addEventListener('click', minimizeShare);
 elements.connectRemoteButton.addEventListener('click', connectRemote);
 elements.disconnectRemoteButton.addEventListener('click', disconnectRemote);
@@ -916,6 +1252,17 @@ elements.chatInput.addEventListener('keydown', (event) => {
     sendFollowUp();
   }
 });
+elements.visionPromptPresetSelect.addEventListener('change', (event) => selectPromptPreset('vision', event.target.value));
+elements.chatPromptPresetSelect.addEventListener('change', (event) => selectPromptPreset('chat', event.target.value));
+elements.visionPromptPresetAddButton.addEventListener('click', () => openPromptPresetDialog('vision'));
+elements.chatPromptPresetAddButton.addEventListener('click', () => openPromptPresetDialog('chat'));
+elements.visionPromptPresetUpdateButton.addEventListener('click', () => updatePromptPreset('vision'));
+elements.chatPromptPresetUpdateButton.addEventListener('click', () => updatePromptPreset('chat'));
+elements.visionPromptPresetDeleteButton.addEventListener('click', () => deletePromptPreset('vision'));
+elements.chatPromptPresetDeleteButton.addEventListener('click', () => deletePromptPreset('chat'));
+promptPresetDialogForm.addEventListener('submit', createPromptPreset);
+cancelPromptPresetButton.addEventListener('click', () => promptPresetDialog.close());
+promptPresetDialog.addEventListener('close', () => { pendingPromptPresetGroup = ''; });
 
 elements.settingsButton.addEventListener('click', openSettings);
 elements.closeSettingsButton.addEventListener('click', closeSettings);
@@ -954,7 +1301,6 @@ elements.copyButton.addEventListener('click', async () => {
   setTimeout(() => { elements.copyButton.textContent = '复制'; }, 1200);
 });
 
-api.onScreenCaptured(receiveScreenshot);
 api.onCaptureError((message) => setCaptureStatus(message, true));
 
 api.onAnalysisAttempt((details) => {
