@@ -72,6 +72,7 @@ const elements = {
   remoteTokenInput: document.getElementById('remoteTokenInput'),
   discoveredDeviceSelect: document.getElementById('discoveredDeviceSelect'),
   discoverDevicesButton: document.getElementById('discoverDevicesButton'),
+  discoverTargetInput: document.getElementById('discoverTargetInput'),
   discoveryStatus: document.getElementById('discoveryStatus'),
   connectRemoteButton: document.getElementById('connectRemoteButton'),
   disconnectRemoteButton: document.getElementById('disconnectRemoteButton')
@@ -930,7 +931,7 @@ async function fetchRemoteFrameData() {
   } catch (error) {
     const reason = error.name === 'TimeoutError' ? '连接超时' : (error.message || '网络不可达');
     throw new Error(
-      `无法连接共享端 ${remoteBaseUrl}（${reason}）。请确认共享端仍在运行、两台设备处于同一局域网，并允许防火墙通过 TCP 8765。`
+      `无法连接共享端 ${remoteBaseUrl}（${reason}）。请确认共享端仍在运行、地址属于同一网段，并允许防火墙通过 TCP 8765；跨网段时还需要校园网未拦截该端口。`
     );
   }
   if (!response.ok) {
@@ -982,7 +983,10 @@ async function startShare() {
     const discoveryMessage = info.discoveryAvailable
       ? ''
       : '\n局域网设备搜索暂不可用，请在另一台设备手动填写地址。';
-    elements.shareInfo.textContent = `共享地址：\n${urls}\n配对码：${info.token}${discoveryMessage}`;
+    const networkMessage = info.networks && info.networks.length
+      ? `\n本机网段：${info.networks.join('、')}`
+      : '';
+    elements.shareInfo.textContent = `共享地址：\n${urls}${networkMessage}\n配对码：${info.token}${discoveryMessage}`;
     elements.minimizeShareButton.disabled = false;
     setLanStatus(info.discoveryAvailable ? '共享端运行中' : '共享端运行中，设备搜索不可用', !info.discoveryAvailable);
   } catch (error) {
@@ -991,20 +995,26 @@ async function startShare() {
 }
 
 async function searchLanDevices() {
+  const target = (elements.discoverTargetInput.value || '').trim();
   elements.discoverDevicesButton.disabled = true;
   elements.discoveredDeviceSelect.disabled = true;
-  setDiscoveryStatus('正在搜索局域网共享设备…');
+  setDiscoveryStatus(target ? `正在搜索 ${target}…` : '正在搜索局域网共享设备…');
   try {
-    discoveredDevices = await api.discoverLanShares();
+    discoveredDevices = await api.discoverLanShares(target ? { targets: [target] } : {});
     elements.discoveredDeviceSelect.replaceChildren(new Option('发现的共享设备', ''));
     for (const device of discoveredDevices) {
       elements.discoveredDeviceSelect.add(new Option(`${device.name} · ${device.address}`, device.id));
     }
     if (discoveredDevices.length) {
       setDiscoveryStatus(`发现 ${discoveredDevices.length} 台共享设备`);
-    } else {
-      setDiscoveryStatus('未发现设备，请确认共享端正在运行。');
+      return;
     }
+    const networks = await api.getLanNetworks().catch(() => []);
+    const networkText = networks.length ? `本机网段：${networks.map((item) => item.cidr).join('、')}。` : '';
+    setDiscoveryStatus(
+      `未发现设备。${networkText}校园网常把有线与无线分到不同网段或开启无线隔离，广播可能到不了对端；请让两台设备处于同一网段，或直接在“远程设备地址”填写 http://共享端IP:8765。`,
+      true
+    );
   } catch (error) {
     discoveredDevices = [];
     elements.discoveredDeviceSelect.replaceChildren(new Option('发现的共享设备', ''));

@@ -19,6 +19,8 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const WebSocket = require('ws');
+const { normalizeCloudPairCredentials } = require('./cloud-pair');
+const { getDefaultPromptPresets } = require('./prompt-presets');
 const { createTrayLifecycle } = require('./tray-lifecycle');
 const { CloudDeviceStore } = require('./cloud-device-store');
 const { cloudRetryDelay } = require('./cloud-reconnect-policy');
@@ -152,8 +154,10 @@ function readPresetGroup(stored, key, kind) {
   return { presets: legacyPresetList(stored || {}, kind), requestedActivePresetId: null };
 }
 
-function normalizePromptPresets(input, kind) {
-  const source = input && Array.isArray(input[kind]) ? input[kind] : [];
+function normalizePromptPresets(input, kind, seedDefaults = false) {
+  const hasList = Boolean(input && Object.prototype.hasOwnProperty.call(input, kind) && Array.isArray(input[kind]));
+  const rawSource = hasList ? input[kind] : [];
+  const source = hasList || !seedDefaults ? rawSource : getDefaultPromptPresets(kind);
   const usedIds = new Set();
   return source.map((entry, index) => {
     const preset = entry && typeof entry === 'object' ? entry : {};
@@ -200,8 +204,8 @@ function readConfig() {
       presets: chat.presets
     },
     promptPresets: {
-      vision: normalizePromptPresets(stored.promptPresets, 'vision'),
-      chat: normalizePromptPresets(stored.promptPresets, 'chat')
+      vision: normalizePromptPresets(stored.promptPresets, 'vision', true),
+      chat: normalizePromptPresets(stored.promptPresets, 'chat', true)
     }
   };
 }
@@ -381,14 +385,76 @@ function resolveApiBackend(config) {
   return 'responses';
 }
 
-function getLanAddresses() {
-  const addresses = [];
+function ipToInt(ip) {
+  return ip.split('.').reduce((acc, part) => (acc << 8) + Number(part), 0) >>> 0;
+}
+
+function intToIp(value) {
+  return [24, 16, 8, 0].map((shift) => (value >>> shift) & 255).join('.');
+}
+
+function netmaskPrefix(netmask) {
+  const bits = ipToInt(netmask);
+  let prefix = 0;
+  for (let i = 31; i >= 0; i -= 1) {
+    if ((bits >>> i) & 1) prefix += 1;
+    else break;
+  }
+  return prefix;
+}
+
+function getLanInterfaces() {
+  const seen = new Set();
+  const result = [];
   for (const interfaces of Object.values(os.networkInterfaces())) {
     for (const item of interfaces || []) {
-      if (item.family === 'IPv4' && !item.internal) addresses.push(item.address);
+      if (item.family !== 'IPv4' || item.internal) continue;
+      if (!item.netmask || seen.has(item.address)) continue;
+      seen.add(item.address);
+      const addressBits = ipToInt(item.address);
+      const maskBits = ipToInt(item.netmask);
+      const prefix = netmaskPrefix(item.netmask);
+      result.push({
+        address: item.address,
+        netmask: item.netmask,
+        broadcast: intToIp((addressBits | (~maskBits >>> 0)) >>> 0),
+        cidr: `${intToIp((addressBits & maskBits) >>> 0)}/${prefix}`
+      });
     }
   }
-  return [...new Set(addresses)];
+  return result;
+}
+
+function getLanAddresses() {
+  return getLanInterfaces().map((item) => item.address);
+}
+
+const maxDiscoveryTargets = 512;
+
+function normalizeDiscoveryTargets(input) {
+  const values = Array.isArray(input) ? input : input ? [input] : [];
+  const result = new Set();
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!text) continue;
+    const cidrMatch = text.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d{1,2})$/);
+    if (cidrMatch) {
+      const prefix = Number(cidrMatch[2]);
+      if (prefix < 16 || prefix > 32) continue;
+      if (prefix >= 31) {
+        result.add(cidrMatch[1]);
+        continue;
+      }
+      const base = ipToInt(cidrMatch[1]) & (((-1 << (32 - prefix)) >>> 0));
+      const size = 2 ** (32 - prefix);
+      for (let offset = 1; offset < size - 1 && result.size < maxDiscoveryTargets; offset += 1) {
+        result.add(intToIp((base + offset) >>> 0));
+      }
+      continue;
+    }
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(text)) result.add(text);
+  }
+  return [...result];
 }
 
 async function captureLanFrame() {
@@ -565,23 +631,26 @@ async function startCloudShare() {
   cloudDeviceStore.assertEncryptionAvailable();
   const relayBase = getRelayBaseUrl();
   sendCloudShareStatus('creating', '正在创建配对码…');
-  const response = await fetch(`${relayBase}/api/pair`, {
-    method: 'POST',
-    cache: 'no-store',
-    signal: AbortSignal.timeout(10_000)
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || `中继返回 HTTP ${response.status}`);
-
-  cloudPairCredentials = {
-    code: String(result.code || '').replace(/-/g, ''),
-    secret: String(result.secret || ''),
-    expiresAt: Number(result.expiresAt)
-  };
-  if (!/^[A-HJ-NP-Z2-9]{8}$/.test(cloudPairCredentials.code) || !cloudPairCredentials.secret) {
-    cloudPairCredentials = null;
-    throw new Error('中继返回的配对信息格式无效');
+  let response;
+  try {
+    // Use Electron's network stack so Windows/system proxy settings are honored.
+    response = await net.fetch(`${relayBase}/api/pair`, {
+      method: 'POST',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000)
+    });
+  } catch (error) {
+    const cause = error?.cause?.message || error?.message || '网络连接失败';
+    throw new Error(`无法连接公网中继（${relayBase}）：${cause}`);
   }
+  const payload = await response.json().catch(() => null);
+  const result = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null;
+  if (!response.ok) {
+    const detail = result && typeof result.error === 'string' ? result.error : '';
+    throw new Error(detail || `中继返回 HTTP ${response.status}`);
+  }
+  const credentials = normalizeCloudPairCredentials(result);
+  cloudPairCredentials = credentials;
   try {
     cloudDeviceStore.save(cloudPairCredentials);
   } catch (error) {
@@ -706,6 +775,7 @@ function lanShareInfo() {
     token: lanShareToken,
     discoveryAvailable: Boolean(lanDiscoverySocket),
     addresses: addressList,
+    networks: getLanInterfaces().map((item) => item.cidr),
     urls: addressList.map((address) => `http://${address}:${port}`)
   };
 }
@@ -746,58 +816,107 @@ function startLanDiscoveryResponder() {
   });
 }
 
-function discoverLanShares() {
-  const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+const lanDiscoveryTimeout = 3000;
+const lanDiscoveryProbeInterval = 800;
+
+async function discoverLanShares(options = {}) {
+  const targets = normalizeDiscoveryTargets(options.targets);
+  const interfaces = getLanInterfaces();
   const devices = new Map();
+  const sockets = [];
+
+  const handleMessage = (message, remote) => {
+    try {
+      const result = JSON.parse(message.toString());
+      if (result.type !== lanDiscoveryResponse) return;
+      const port = Number(result.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return;
+      const address = remote.address;
+      const id = `${address}:${port}`;
+      devices.set(id, {
+        id,
+        name: String(result.name || address),
+        address,
+        url: `http://${address}:${port}`
+      });
+    } catch {
+      // Ignore unrelated UDP broadcasts.
+    }
+  };
+
+  const createProbeSocket = (bindAddress) =>
+    new Promise((resolve) => {
+      let settled = false;
+      const done = (socket) => {
+        if (settled) return;
+        settled = true;
+        resolve(socket);
+      };
+      const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      const guard = setTimeout(() => {
+        try {
+          socket.close();
+        } catch {}
+        done(null);
+      }, 1000);
+      socket.on('error', () => {
+        clearTimeout(guard);
+        done(null);
+      });
+      socket.on('message', handleMessage);
+      socket.bind(0, bindAddress, () => {
+        clearTimeout(guard);
+        try {
+          socket.setBroadcast(true);
+        } catch {}
+        sockets.push(socket);
+        done(socket);
+      });
+    });
+
+  const receiver = await createProbeSocket('0.0.0.0');
+  const interfaceSockets = await Promise.all(
+    interfaces.map((item) => createProbeSocket(item.address))
+  );
+
+  const sendProbe = (socket, address) => {
+    if (!socket || !address) return;
+    try {
+      socket.send(lanDiscoveryRequest, lanDiscoveryPort, address, () => {});
+    } catch {
+      // Ignore interfaces that reject broadcast traffic.
+    }
+  };
+
+  const probe = () => {
+    sendProbe(receiver, '255.255.255.255');
+    interfaceSockets.forEach((socket, index) => sendProbe(socket, interfaces[index].broadcast));
+    for (const target of targets) sendProbe(receiver, target);
+  };
 
   return new Promise((resolve, reject) => {
     let completed = false;
-    let timeout;
+    let timer;
+    let interval;
     const finish = (error) => {
       if (completed) return;
       completed = true;
-      clearTimeout(timeout);
-      try {
-        socket.close();
-      } catch {}
+      clearTimeout(timer);
+      clearInterval(interval);
+      for (const socket of sockets) {
+        try {
+          socket.close();
+        } catch {}
+      }
       if (error) {
         reject(new Error(`局域网设备搜索失败：${error.message}`));
         return;
       }
       resolve([...devices.values()].sort((left, right) => left.name.localeCompare(right.name)));
     };
-
-    socket.on('error', finish);
-    socket.on('message', (message, remote) => {
-      try {
-        const result = JSON.parse(message.toString());
-        if (result.type !== lanDiscoveryResponse) return;
-        const port = Number(result.port);
-        if (!Number.isInteger(port) || port < 1 || port > 65535) return;
-        const address = remote.address;
-        const id = `${address}:${port}`;
-        devices.set(id, {
-          id,
-          name: String(result.name || address),
-          address,
-          url: `http://${address}:${port}`
-        });
-      } catch {
-        // Ignore unrelated UDP broadcasts.
-      }
-    });
-
-    timeout = setTimeout(() => finish(), 1600);
-    socket.bind(0, '0.0.0.0', () => {
-      try {
-        socket.setBroadcast(true);
-        socket.send(lanDiscoveryRequest, lanDiscoveryPort, '255.255.255.255', (error) => {
-          if (error) finish(error);
-        });
-      } catch (error) {
-        finish(error);
-      }
-    });
+    timer = setTimeout(() => finish(), lanDiscoveryTimeout);
+    interval = setInterval(probe, lanDiscoveryProbeInterval);
+    probe();
   });
 }
 
@@ -1183,7 +1302,8 @@ app.whenReady().then(() => {
   ipcMain.handle('get-cloud-share-state', () => ({ status: lastCloudShareStatus, info: cloudPairInfo() }));
   ipcMain.handle('get-cloud-auto-start', () => getCloudAutoStart(app));
   ipcMain.handle('set-cloud-auto-start', (_event, enabled) => setCloudAutoStart(app, enabled));
-  ipcMain.handle('discover-lan-shares', () => discoverLanShares());
+  ipcMain.handle('discover-lan-shares', (_event, options) => discoverLanShares(options || {}));
+  ipcMain.handle('get-lan-networks', () => getLanInterfaces());
   ipcMain.handle('minimize-lan-share', () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
     return { ok: true };
