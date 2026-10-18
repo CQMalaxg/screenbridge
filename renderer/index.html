@@ -44,19 +44,26 @@
               <div class="empty-preview" id="emptyPreview">
                 <div class="capture-icon">⌁</div>
                 <strong>还没有截图</strong>
-                <span>可连续添加多张截图，再一起分析</span>
+                <span>单张快捷模式会直接截屏并分析；多图时切换到多图批次</span>
               </div>
               <img id="screenPreview" alt="屏幕截图预览" />
             </div>
 
             <div class="screenshot-gallery" id="screenshotGallery" aria-label="已添加的截图" hidden></div>
 
+            <div class="capture-mode-switch" role="group" aria-label="截图模式">
+              <button class="capture-mode-button is-active" id="singleShotModeButton" type="button" aria-pressed="true">单张快捷</button>
+              <button class="capture-mode-button" id="multiShotModeButton" type="button" aria-pressed="false">多图批次</button>
+            </div>
+
             <div class="action-row capture-actions">
-              <button class="secondary-button" id="addScreenshotButton">添加截图</button>
-              <button class="primary-button" id="analyzeScreenshotsButton" disabled>分析截图</button>
+              <button class="primary-button" id="quickAnalyzeButton">清空并截图分析</button>
+              <button class="secondary-button" id="addScreenshotButton" hidden>添加截图</button>
+              <button class="primary-button" id="analyzeScreenshotsButton" disabled hidden>分析截图</button>
               <button class="secondary-button" id="retryAnalyzeButton" disabled>重试分析</button>
               <button class="ghost-button" id="clearButton" disabled>清除截图</button>
             </div>
+            <div class="hint">单张快捷会用新截图替换旧截图并立即提问；需要连续截取多张时切换到“多图批次”。</div>
           </section>
 
           <section class="card prompt-card">

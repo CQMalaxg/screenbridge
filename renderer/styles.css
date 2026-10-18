@@ -88,6 +88,9 @@ h1 { margin: 7px 0 4px; font-size: 30px; letter-spacing: -0.04em; }
 .action-row { display: flex; gap: 10px; margin-top: 16px; }
 .capture-actions { flex-wrap: wrap; }
 .capture-actions .secondary-button { width: auto; margin-top: 0; }
+.capture-mode-switch { display: flex; gap: 4px; margin-top: 14px; padding: 4px; border-radius: 11px; background: #f1f3f8; }
+.capture-mode-button { flex: 1; padding: 8px 12px; color: #697286; background: transparent; }
+.capture-mode-button.is-active { color: #5e55dc; background: #fff; box-shadow: 0 2px 8px rgba(38, 44, 74, .08); }
 button { border: 0; border-radius: 10px; padding: 10px 15px; font-weight: 700; font-size: 13px; transition: transform .15s ease, opacity .15s ease, box-shadow .15s ease; }
 button:not(:disabled):hover { transform: translateY(-1px); }
 button:disabled { cursor: not-allowed; opacity: .45; }

@@ -3,6 +3,9 @@ const api = window.assistantAPI;
 const elements = {
   addScreenshotButton: document.getElementById('addScreenshotButton'),
   analyzeScreenshotsButton: document.getElementById('analyzeScreenshotsButton'),
+  quickAnalyzeButton: document.getElementById('quickAnalyzeButton'),
+  singleShotModeButton: document.getElementById('singleShotModeButton'),
+  multiShotModeButton: document.getElementById('multiShotModeButton'),
   retryAnalyzeButton: document.getElementById('retryAnalyzeButton'),
   clearButton: document.getElementById('clearButton'),
   stopButton: document.getElementById('stopButton'),
@@ -96,7 +99,10 @@ let selectedScreenshotIndex = -1;
 let screenStream = null;
 let monitorStarted = false;
 let isGenerating = false;
+let isCapturing = false;
 let generatingKind = '';
+let captureMode = 'single';
+let currentBatchAnalyzed = false;
 let remoteConnected = false;
 let remoteBaseUrl = '';
 let remoteToken = '';
@@ -337,24 +343,68 @@ function buildChatHistory() {
     .map((message) => ({ role: message.role, content: message.content.trim() }));
 }
 
+function isCaptureBusy() {
+  return isGenerating || isCapturing;
+}
+
+function updateCaptureActions() {
+  const busy = isCaptureBusy();
+  const hasScreenshots = currentScreenshots.length > 0;
+  const hasUnsubmittedBatch = currentScreenshots.length > 1 && !currentBatchAnalyzed;
+
+  elements.quickAnalyzeButton.textContent = busy && captureMode === 'single'
+    ? '正在截取并分析…'
+    : '清空并截图分析';
+  elements.quickAnalyzeButton.disabled = busy || hasUnsubmittedBatch;
+  elements.singleShotModeButton.disabled = busy;
+  elements.multiShotModeButton.disabled = busy;
+  elements.addScreenshotButton.disabled = busy;
+  elements.analyzeScreenshotsButton.disabled = busy || !hasScreenshots;
+  elements.retryAnalyzeButton.disabled = busy || !hasScreenshots;
+  elements.clearButton.disabled = busy || !hasScreenshots;
+  elements.stopButton.disabled = !isGenerating;
+}
+
+function setCaptureMode(mode) {
+  if (isCaptureBusy()) return;
+  if (mode !== 'single' && mode !== 'multi') return;
+  if (mode === 'single' && currentScreenshots.length > 1 && !currentBatchAnalyzed) {
+    setCaptureStatus('当前多图批次尚未分析，请先分析或清除截图，再切换单张快捷模式', true);
+    return;
+  }
+
+  captureMode = mode;
+  const singleMode = mode === 'single';
+  elements.singleShotModeButton.classList.toggle('is-active', singleMode);
+  elements.singleShotModeButton.setAttribute('aria-pressed', String(singleMode));
+  elements.multiShotModeButton.classList.toggle('is-active', !singleMode);
+  elements.multiShotModeButton.setAttribute('aria-pressed', String(!singleMode));
+  elements.quickAnalyzeButton.hidden = !singleMode;
+  elements.addScreenshotButton.hidden = singleMode;
+  elements.analyzeScreenshotsButton.hidden = singleMode;
+  updateCaptureActions();
+}
+
+function setCapturing(value) {
+  isCapturing = value;
+  updateCaptureActions();
+  updateComposerState();
+}
+
 function setGenerating(value, kind = '') {
   isGenerating = value;
   generatingKind = value ? kind : '';
-  elements.addScreenshotButton.disabled = value;
-  elements.analyzeScreenshotsButton.disabled = value || currentScreenshots.length === 0;
-  elements.retryAnalyzeButton.disabled = value || currentScreenshots.length === 0;
-  elements.clearButton.disabled = value || currentScreenshots.length === 0;
-  elements.stopButton.disabled = !value;
+  updateCaptureActions();
   updateComposerState();
 }
 
 function updateComposerState() {
-  const ready = hasAnswer() && !isGenerating;
+  const ready = hasAnswer() && !isCaptureBusy();
   elements.chatInput.disabled = !ready;
   elements.sendChatButton.disabled = !ready;
   elements.attachImageInput.disabled = !ready || currentScreenshots.length === 0;
   updateModelSelectorState();
-  if (!isGenerating) {
+  if (!isCaptureBusy()) {
     elements.chatHint.textContent = hasAnswer()
       ? '追问由“对话模型”处理，会带上本轮对话上下文。'
       : '完成一次截图分析后即可开始追问，追问由“对话模型”处理。';
@@ -388,7 +438,7 @@ function renderModelSelector(group) {
     return `<option value="${escapeHtml(preset.id)}"${disabled}>${escapeHtml(preset.name || preset.id)}${escapeHtml(detail)}</option>`;
   }).join('');
   select.value = selectedId;
-  select.disabled = isGenerating;
+  select.disabled = isCaptureBusy();
 }
 
 function renderModelSelectors() {
@@ -399,7 +449,7 @@ function renderModelSelectors() {
 function updateModelSelectorState() {
   for (const group of ['vision', 'chat']) {
     const select = modelSelectorElements(group);
-    if (select) select.disabled = isGenerating || !appConfig;
+    if (select) select.disabled = isCaptureBusy() || !appConfig;
   }
 }
 
@@ -842,9 +892,7 @@ function renderScreenshotBatch() {
   elements.analyzeScreenshotsButton.textContent = hasScreenshots
     ? `分析 ${currentScreenshots.length} 张截图`
     : '分析截图';
-  elements.analyzeScreenshotsButton.disabled = isGenerating || !hasScreenshots;
-  elements.retryAnalyzeButton.disabled = isGenerating || !hasScreenshots;
-  elements.clearButton.disabled = isGenerating || !hasScreenshots;
+  updateCaptureActions();
   updateComposerState();
 }
 
@@ -853,6 +901,7 @@ function addScreenshot(dataUrl) {
     throw new Error('截图数据无效');
   }
   currentScreenshots.push(dataUrl);
+  currentBatchAnalyzed = false;
   selectedScreenshotIndex = currentScreenshots.length - 1;
   renderScreenshotBatch();
   setCaptureStatus(`已添加 ${currentScreenshots.length} 张截图，可统一分析`);
@@ -861,6 +910,7 @@ function addScreenshot(dataUrl) {
 function removeScreenshot(index) {
   if (!Number.isInteger(index) || index < 0 || index >= currentScreenshots.length) return;
   currentScreenshots.splice(index, 1);
+  currentBatchAnalyzed = false;
   if (index < selectedScreenshotIndex) selectedScreenshotIndex -= 1;
   else if (index === selectedScreenshotIndex) selectedScreenshotIndex = Math.min(index, currentScreenshots.length - 1);
   renderScreenshotBatch();
@@ -892,8 +942,8 @@ async function startScreenMonitor() {
     elements.screenMonitor.srcObject = screenStream;
     await elements.screenMonitor.play();
     monitorStarted = true;
-    elements.shortcutStatus.textContent = '屏幕监听中 · 点击按钮分析';
-    setCaptureStatus('屏幕监听中，可连续添加截图后分析');
+    elements.shortcutStatus.textContent = '屏幕监听中 · 可直接截屏分析';
+    setCaptureStatus('屏幕监听中，可直接分析单张或切换到多图批次');
   } catch (error) {
     monitorStarted = false;
     elements.shortcutStatus.textContent = '监听启动失败，将使用单次截图';
@@ -1095,8 +1145,11 @@ async function analyzeScreenshots(screenshots = currentScreenshots) {
     throw new Error('请选择已配置 API 地址和模型名称的视觉模型');
   }
   const prompt = elements.promptInput.value.trim() || '请分析这些截图并给出回答。';
+  setGenerating(true, 'vision');
+  setCaptureStatus('正在准备截图…');
   const imageDataUrls = await Promise.all(screenshots.map(compressImage));
 
+  currentBatchAnalyzed = true;
   thread = [];
   renderThread();
   pushMessage({ role: 'user', content: prompt, meta: `截图提问 · ${screenshots.length} 张` });
@@ -1108,7 +1161,6 @@ async function analyzeScreenshots(screenshots = currentScreenshots) {
     streaming: true
   });
 
-  setGenerating(true, 'vision');
   setCaptureStatus('正在分析…');
   await api.analyzeImage({
     imageDataUrls,
@@ -1232,8 +1284,9 @@ elements.cloudAutoStartInput?.addEventListener('change', async () => {
 initializeCloudShareControls();
 
 async function captureScreenshot() {
-  if (isGenerating) return;
+  if (isCaptureBusy()) return;
 
+  setCapturing(true);
   try {
     setCaptureStatus('正在截取当前屏幕…');
     const screenshot = await captureCurrentScreen();
@@ -1241,11 +1294,47 @@ async function captureScreenshot() {
   } catch (error) {
     setCaptureStatus(`添加截图失败：${error.message || error}`, true);
     if (remoteConnected) setLanStatus(error.message || '远程屏幕连接失败', true);
+  } finally {
+    setCapturing(false);
+  }
+}
+
+async function quickCaptureAndAnalyze() {
+  if (isCaptureBusy()) return;
+
+  let captured = false;
+  setCapturing(true);
+  try {
+    setCaptureStatus('正在截取新屏幕…');
+    const screenshot = await captureCurrentScreen();
+    if (typeof screenshot !== 'string' || !screenshot.startsWith('data:image/')) {
+      throw new Error('截图数据无效');
+    }
+
+    currentScreenshots = [screenshot];
+    currentBatchAnalyzed = false;
+    selectedScreenshotIndex = 0;
+    captured = true;
+    renderScreenshotBatch();
+    await analyzeScreenshots();
+  } catch (error) {
+    setGenerating(false);
+    const hasStreamingMessage = streamingIndex >= 0;
+    if (hasStreamingMessage) {
+      failStreaming(streamingIndex, `分析失败：\n${error.message || error}`, '视觉模型');
+      streamingIndex = -1;
+    }
+    setCaptureStatus(captured
+      ? `分析失败：${error.message || error}`
+      : `截屏失败，保留原截图：${error.message || error}`, true);
+    if (!captured && remoteConnected) setLanStatus(error.message || '远程屏幕连接失败', true);
+  } finally {
+    setCapturing(false);
   }
 }
 
 async function analyzeScreenshotBatch() {
-  if (isGenerating || currentScreenshots.length === 0) return;
+  if (isCaptureBusy() || currentScreenshots.length === 0) return;
 
   try {
     await analyzeScreenshots();
@@ -1258,7 +1347,7 @@ async function analyzeScreenshotBatch() {
 }
 
 async function retryScreenshotBatch() {
-  if (isGenerating || currentScreenshots.length === 0) return;
+  if (isCaptureBusy() || currentScreenshots.length === 0) return;
   try {
     await analyzeScreenshots();
   } catch (error) {
@@ -1271,7 +1360,7 @@ async function retryScreenshotBatch() {
 
 async function sendFollowUp() {
   const text = elements.chatInput.value.trim();
-  if (!text || isGenerating || !appConfig) return;
+  if (!text || isCaptureBusy() || !appConfig) return;
   const selectedPreset = selectedModelPreset('chat');
   if (!selectedPreset || !selectedPreset.baseUrl || !selectedPreset.model) {
     setCaptureStatus('请选择已配置 API 地址和模型名称的对话模型', true);
@@ -1312,15 +1401,20 @@ async function sendFollowUp() {
 }
 
 function clearAll() {
-  if (isGenerating) return;
+  if (isCaptureBusy()) return;
   currentScreenshots = [];
+  currentBatchAnalyzed = false;
   selectedScreenshotIndex = -1;
   renderScreenshotBatch();
-  setCaptureStatus(remoteConnected ? '远程屏幕连接中' : (monitorStarted ? '屏幕监听中，可添加截图' : '等待截图'));
+  setCaptureStatus(remoteConnected
+    ? '远程屏幕连接中'
+    : (monitorStarted
+      ? (captureMode === 'single' ? '屏幕监听中，可直接截图分析' : '屏幕监听中，可添加多张截图')
+      : '等待截图'));
 }
 
 function clearThread() {
-  if (isGenerating) return;
+  if (isCaptureBusy()) return;
   thread = [];
   renderThread();
   updateComposerState();
@@ -1329,10 +1423,14 @@ function clearThread() {
 /* ---------- events ---------- */
 
 elements.addScreenshotButton.addEventListener('click', captureScreenshot);
+elements.quickAnalyzeButton.addEventListener('click', quickCaptureAndAnalyze);
+elements.singleShotModeButton.addEventListener('click', () => setCaptureMode('single'));
+elements.multiShotModeButton.addEventListener('click', () => setCaptureMode('multi'));
 elements.analyzeScreenshotsButton.addEventListener('click', analyzeScreenshotBatch);
 elements.retryAnalyzeButton.addEventListener('click', retryScreenshotBatch);
 elements.clearButton.addEventListener('click', clearAll);
 elements.screenshotGallery.addEventListener('click', (event) => {
+  if (isCaptureBusy()) return;
   const removeButton = event.target.closest('[data-remove-index]');
   if (removeButton) {
     removeScreenshot(Number(removeButton.dataset.removeIndex));
@@ -1444,7 +1542,10 @@ api.onAnalysisChunk((chunk) => {
 api.onAnalysisComplete((details) => {
   finishStreaming(streamingIndex, details, '视觉模型');
   const suffix = details && details.attempts > 1 ? `，已切换到 ${details.presetName}` : '';
-  setCaptureStatus(`分析完成${suffix}，可继续追问或再次截图`);
+  const nextAction = captureMode === 'single'
+    ? '可继续追问，或点击“清空并截图分析”开始下一题'
+    : '可继续追问或添加多张截图继续分析';
+  setCaptureStatus(`分析完成${suffix}，${nextAction}`);
 });
 api.onAnalysisStopped(() => {
   const message = thread[streamingIndex];
@@ -1508,6 +1609,7 @@ api.onChatError((message) => {
 api.getConfig()
   .then(loadConfig)
   .catch(() => setCaptureStatus('配置读取失败', true));
+setCaptureMode('single');
 startScreenMonitor();
 
 window.addEventListener('beforeunload', () => {
