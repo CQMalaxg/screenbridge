@@ -13,6 +13,7 @@ const elements = {
   previewWrap: document.getElementById('previewWrap'),
   screenshotGallery: document.getElementById('screenshotGallery'),
   promptInput: document.getElementById('promptInput'),
+  visionModelSelect: document.getElementById('visionModelSelect'),
   visionPromptPresetSelect: document.getElementById('visionPromptPresetSelect'),
   visionPromptPresetAddButton: document.getElementById('visionPromptPresetAddButton'),
   visionPromptPresetUpdateButton: document.getElementById('visionPromptPresetUpdateButton'),
@@ -23,6 +24,7 @@ const elements = {
   thread: document.getElementById('thread'),
   threadEmpty: document.getElementById('threadEmpty'),
   chatInput: document.getElementById('chatInput'),
+  chatModelSelect: document.getElementById('chatModelSelect'),
   chatPromptPresetSelect: document.getElementById('chatPromptPresetSelect'),
   chatPromptPresetAddButton: document.getElementById('chatPromptPresetAddButton'),
   chatPromptPresetUpdateButton: document.getElementById('chatPromptPresetUpdateButton'),
@@ -47,9 +49,6 @@ const elements = {
   stPresetNameInput: document.getElementById('stPresetNameInput'),
   stPrimaryPresetInput: document.getElementById('stPrimaryPresetInput'),
   stPrimaryPresetLabel: document.getElementById('stPrimaryPresetLabel'),
-  stPriorityInput: document.getElementById('stPriorityInput'),
-  stPresetEnabledInput: document.getElementById('stPresetEnabledInput'),
-  stAutoFallbackInput: document.getElementById('stAutoFallbackInput'),
   stBaseUrlInput: document.getElementById('stBaseUrlInput'),
   stApiBackendInput: document.getElementById('stApiBackendInput'),
   stModelInput: document.getElementById('stModelInput'),
@@ -92,6 +91,7 @@ const groupLabels = {
 };
 
 let currentScreenshots = [];
+let lastAnalyzedScreenshots = [];
 let selectedScreenshotIndex = -1;
 let screenStream = null;
 let monitorStarted = false;
@@ -111,6 +111,7 @@ let settingsConfig = null;
 let settingsGroup = 'vision';
 let editingPresetId = '';
 const selectedPromptPresetIds = { vision: '', chat: '' };
+const selectedModelPresetIds = { vision: '', chat: '' };
 let pendingPromptPresetGroup = '';
 let promptPresetSaving = false;
 let discoveredDevices = [];
@@ -287,6 +288,7 @@ function updateMessageNode(index) {
   const message = thread[index];
   if (!node || !message) return;
 
+  hideAnswerSelectionMagnifier();
   node.classList.toggle('is-error', Boolean(message.error));
   node.classList.toggle('is-streaming', Boolean(message.streaming));
   const role = node.querySelector('.message-role');
@@ -308,6 +310,7 @@ function pushMessage(message) {
 }
 
 function renderThread() {
+  hideAnswerSelectionMagnifier();
   messageNodes = [];
   elements.thread.replaceChildren(elements.threadEmpty);
   elements.threadEmpty.style.display = thread.length ? 'none' : 'block';
@@ -322,6 +325,75 @@ function renderThread() {
 function scrollThreadToBottom() {
   elements.thread.scrollTop = elements.thread.scrollHeight;
 }
+
+function hideAnswerSelectionMagnifier() {
+  const magnifier = document.getElementById('answerSelectionMagnifier');
+  if (magnifier) magnifier.hidden = true;
+}
+
+function updateAnswerSelectionMagnifier() {
+  const magnifier = document.getElementById('answerSelectionMagnifier');
+  const selection = window.getSelection && window.getSelection();
+  if (!magnifier || !selection || selection.isCollapsed || !selection.toString().trim()
+      || !selection.anchorNode || !selection.focusNode) {
+    hideAnswerSelectionMagnifier();
+    return;
+  }
+
+  const getAnswerBody = (node) => {
+    const element = node.nodeType === 1 ? node : node.parentElement;
+    return element && element.closest ? element.closest('.message-assistant .message-body') : null;
+  };
+  const answerBody = getAnswerBody(selection.anchorNode);
+  if (!answerBody || answerBody !== getAnswerBody(selection.focusNode) || !elements.thread.contains(answerBody)) {
+    hideAnswerSelectionMagnifier();
+    return;
+  }
+
+  const selectedRect = selection.getRangeAt(0).getBoundingClientRect();
+  if (!selectedRect || (!selectedRect.width && !selectedRect.height)) {
+    hideAnswerSelectionMagnifier();
+    return;
+  }
+
+  magnifier.textContent = selection.toString().trim();
+  magnifier.hidden = false;
+  const bounds = magnifier.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const margin = 12;
+  const left = Math.max(margin, Math.min(
+    viewportWidth - bounds.width - margin,
+    selectedRect.left + selectedRect.width / 2 - bounds.width / 2
+  ));
+  let top = selectedRect.top - bounds.height - margin;
+  if (top < margin) top = selectedRect.bottom + margin;
+  top = Math.max(margin, Math.min(viewportHeight - bounds.height - margin, top));
+  magnifier.style.left = `${left}px`;
+  magnifier.style.top = `${top}px`;
+}
+
+let answerSelectionTimer = null;
+function scheduleAnswerSelectionMagnifier() {
+  if (answerSelectionTimer !== null) clearTimeout(answerSelectionTimer);
+  answerSelectionTimer = setTimeout(() => {
+    answerSelectionTimer = null;
+    updateAnswerSelectionMagnifier();
+  }, 45);
+}
+
+document.addEventListener('selectionchange', scheduleAnswerSelectionMagnifier);
+document.addEventListener('mouseup', scheduleAnswerSelectionMagnifier);
+document.addEventListener('touchend', scheduleAnswerSelectionMagnifier);
+document.addEventListener('keyup', scheduleAnswerSelectionMagnifier);
+document.addEventListener('pointerdown', (event) => {
+  const target = event.target;
+  if (!target || !target.closest || !target.closest('.message-assistant .message-body')) {
+    hideAnswerSelectionMagnifier();
+  }
+});
+window.addEventListener('resize', hideAnswerSelectionMagnifier);
+document.addEventListener('scroll', hideAnswerSelectionMagnifier, { capture: true, passive: true });
 
 function hasAnswer() {
   return thread.some((message) => message.role === 'assistant' && !message.error && message.content.trim());
@@ -340,14 +412,14 @@ function buildChatHistory() {
     .map((message) => ({ role: message.role, content: message.content.trim() }));
 }
 
-function setGenerating(value, kind = '') {
+function setGenerating(value, kind = '', canStop = value) {
   isGenerating = value;
   generatingKind = value ? kind : '';
   elements.addScreenshotButton.disabled = value;
   elements.analyzeScreenshotsButton.disabled = value || currentScreenshots.length === 0;
-  elements.retryAnalyzeButton.disabled = value || currentScreenshots.length === 0;
+  elements.retryAnalyzeButton.disabled = value || (currentScreenshots.length === 0 && lastAnalyzedScreenshots.length === 0);
   elements.clearButton.disabled = value || currentScreenshots.length === 0;
-  elements.stopButton.disabled = !value;
+  elements.stopButton.disabled = !value || !canStop;
   updateComposerState();
 }
 
@@ -355,11 +427,58 @@ function updateComposerState() {
   const ready = hasAnswer() && !isGenerating;
   elements.chatInput.disabled = !ready;
   elements.sendChatButton.disabled = !ready;
-  elements.attachImageInput.disabled = !ready || currentScreenshots.length === 0;
+  elements.attachImageInput.disabled = !ready || (currentScreenshots.length === 0 && lastAnalyzedScreenshots.length === 0);
+  updateModelSelectorState();
   if (!isGenerating) {
     elements.chatHint.textContent = hasAnswer()
       ? '追问由“对话模型”处理，会带上本轮对话上下文。'
       : '完成一次截图分析后即可开始追问，追问由“对话模型”处理。';
+  }
+}
+
+function modelSelectorElements(group) {
+  return group === 'vision' ? elements.visionModelSelect : elements.chatModelSelect;
+}
+
+function selectedModelPreset(group) {
+  const data = appConfig && appConfig[group];
+  if (!data || !Array.isArray(data.presets) || !data.presets.length) return null;
+  const selected = selectedModelPresetIds[group];
+  if (selected) return data.presets.find((preset) => preset.id === selected) || null;
+  return data.presets.find((preset) => preset.id === data.activePresetId) || data.presets[0];
+}
+
+function renderModelSelector(group) {
+  const select = modelSelectorElements(group);
+  if (!select || !appConfig || !appConfig[group]) return;
+  const data = appConfig[group];
+  const selectedId = selectedModelPresetIds[group];
+  const selectionWasRemoved = selectedId && !data.presets.some((preset) => preset.id === selectedId);
+  if (selectionWasRemoved) {
+    selectedModelPresetIds[group] = '';
+    const fallback = data.presets.find((preset) => preset.id === data.activePresetId) || data.presets[0];
+    setCaptureStatus(`已选择的${groupLabels[group].name}模型已从同步配置中移除，当前选择为“${fallback.name}”。`);
+  }
+  const selected = selectedModelPreset(group);
+  const renderedSelectedId = selected ? selected.id : '';
+  select.innerHTML = data.presets.map((preset) => {
+    const detail = preset.model ? ` · ${preset.model}` : ' · 未配置模型';
+    const disabled = !preset.baseUrl || !preset.model ? ' disabled' : '';
+    return `<option value="${escapeHtml(preset.id)}"${disabled}>${escapeHtml(preset.name || preset.id)}${escapeHtml(detail)}</option>`;
+  }).join('');
+  select.value = renderedSelectedId;
+  select.disabled = isGenerating;
+}
+
+function renderModelSelectors() {
+  renderModelSelector('vision');
+  renderModelSelector('chat');
+}
+
+function updateModelSelectorState() {
+  for (const group of ['vision', 'chat']) {
+    const select = modelSelectorElements(group);
+    if (select) select.disabled = isGenerating || !appConfig;
   }
 }
 
@@ -441,15 +560,15 @@ function cloneConfig(config) {
 }
 
 function updateModelChips() {
-  const describe = (group, label) => {
-    const preset = group.presets.find((item) => item.id === group.activePresetId) || group.presets[0];
+  const describe = (kind, label) => {
+    const preset = selectedModelPreset(kind);
     if (!preset || !preset.model) return `${label}：未配置`;
     return `${label}：${preset.name} · ${preset.model}`;
   };
-  elements.visionChip.textContent = describe(appConfig.vision, '视觉');
-  elements.chatChip.textContent = describe(appConfig.chat, '对话');
-  elements.visionChip.classList.toggle('is-missing', !appConfig.vision.presets.some((item) => item.id === appConfig.vision.activePresetId && item.model));
-  elements.chatChip.classList.toggle('is-missing', !appConfig.chat.presets.some((item) => item.id === appConfig.chat.activePresetId && item.model));
+  elements.visionChip.textContent = describe('vision', '视觉');
+  elements.chatChip.textContent = describe('chat', '对话');
+  elements.visionChip.classList.toggle('is-missing', !selectedModelPreset('vision')?.model);
+  elements.chatChip.classList.toggle('is-missing', !selectedModelPreset('chat')?.model);
 }
 
 function loadConfig(config) {
@@ -460,6 +579,7 @@ function loadConfig(config) {
     }
     renderPromptPresetToolbar(group);
   }
+  renderModelSelectors();
   updateModelChips();
   updateComposerState();
   updateSettingsAccessState();
@@ -474,9 +594,6 @@ function updateSettingsAccessState() {
   const editableControls = [
     elements.stPrimaryPresetInput,
     elements.stPresetNameInput,
-    elements.stPriorityInput,
-    elements.stPresetEnabledInput,
-    elements.stAutoFallbackInput,
     elements.stBaseUrlInput,
     elements.stApiBackendInput,
     elements.stModelInput,
@@ -652,11 +769,8 @@ function commitPresetForm() {
   if (sourceConfigActive()) return;
   const preset = editingPreset();
   if (!preset) return;
-  const priority = Number.parseInt(elements.stPriorityInput.value, 10);
   Object.assign(preset, {
     name: elements.stPresetNameInput.value.trim() || '未命名预设',
-    priority: Number.isFinite(priority) && priority > 0 ? priority : 1,
-    enabled: elements.stPresetEnabledInput.checked,
     baseUrl: elements.stBaseUrlInput.value.trim(),
     apiBackend: elements.stApiBackendInput.value,
     model: elements.stModelInput.value.trim(),
@@ -669,7 +783,7 @@ function commitPresetForm() {
 function renderPresetOptions() {
   const group = settingsGroupData();
   elements.stPresetSelect.innerHTML = group.presets
-    .map((preset) => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)} · P${preset.priority}</option>`)
+    .map((preset) => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)} · ${escapeHtml(preset.model || '未配置模型')}</option>`)
     .join('');
   elements.stPresetSelect.value = editingPresetId || group.activePresetId;
   elements.stPresetSelect.disabled = false;
@@ -684,8 +798,6 @@ function renderPresetForm(presetId) {
   elements.stPresetSelect.value = preset.id;
   elements.stPresetNameInput.value = preset.name || '';
   elements.stPrimaryPresetInput.checked = group.activePresetId === preset.id;
-  elements.stPriorityInput.value = preset.priority || 1;
-  elements.stPresetEnabledInput.checked = preset.enabled !== false;
   elements.stBaseUrlInput.value = preset.baseUrl || '';
   elements.stApiBackendInput.value = preset.apiBackend || 'responses';
   elements.stModelInput.value = preset.model || '';
@@ -703,7 +815,6 @@ function renderSettings() {
   elements.stPrimaryPresetLabel.textContent = `设为${isVision ? '视觉' : '对话'}模型主用预设`;
   elements.stVisionPromptField.hidden = !isVision;
   elements.stChatPromptField.hidden = isVision;
-  elements.stAutoFallbackInput.checked = settingsConfig.autoFallback !== false;
   elements.stSystemPromptInput.value = settingsConfig.systemPrompt || '';
   elements.stChatSystemPromptInput.value = settingsConfig.chatSystemPrompt || '';
 
@@ -739,7 +850,6 @@ function addPreset() {
   commitPresetForm();
   const group = settingsGroupData();
   const current = editingPreset();
-  const nextPriority = Math.max(...group.presets.map((preset) => preset.priority || 0)) + 1;
   const preset = {
     id: createPresetId(),
     name: `${groupLabels[settingsGroup].name} ${group.presets.length + 1}`,
@@ -749,7 +859,7 @@ function addPreset() {
     apiKey: current ? current.apiKey : '',
     proxyUrl: current ? current.proxyUrl : '',
     enabled: true,
-    priority: nextPriority
+    priority: group.presets.length + 1
   };
   group.presets.push(preset);
   renderPresetOptions();
@@ -774,7 +884,6 @@ function deletePreset() {
 async function saveSettings() {
   if (!settingsConfig || sourceConfigActive()) return;
   commitPresetForm();
-  settingsConfig.autoFallback = elements.stAutoFallbackInput.checked;
   settingsConfig.systemPrompt = elements.stSystemPromptInput.value.trim();
   settingsConfig.chatSystemPrompt = elements.stChatSystemPromptInput.value.trim();
 
@@ -863,7 +972,7 @@ function renderScreenshotBatch() {
     ? `分析 ${currentScreenshots.length} 张截图`
     : '分析截图';
   elements.analyzeScreenshotsButton.disabled = isGenerating || !hasScreenshots;
-  elements.retryAnalyzeButton.disabled = isGenerating || !hasScreenshots;
+  elements.retryAnalyzeButton.disabled = isGenerating || (!hasScreenshots && lastAnalyzedScreenshots.length === 0);
   elements.clearButton.disabled = isGenerating || !hasScreenshots;
   updateComposerState();
 }
@@ -1177,6 +1286,10 @@ async function analyzeScreenshots(screenshots = currentScreenshots) {
       || screenshots.some((screenshot) => typeof screenshot !== 'string' || !screenshot.startsWith('data:image/'))) {
     throw new Error('没有有效截图，请重新添加后重试');
   }
+  const selectedPreset = selectedModelPreset('vision');
+  if (!selectedPreset || !selectedPreset.baseUrl || !selectedPreset.model) {
+    throw new Error('请选择已配置 API 地址和模型名称的视觉模型');
+  }
   const prompt = elements.promptInput.value.trim() || '请分析这些截图并给出回答。';
   const imageDataUrls = await Promise.all(screenshots.map(compressImage));
 
@@ -1196,7 +1309,7 @@ async function analyzeScreenshots(screenshots = currentScreenshots) {
   await api.analyzeImage({
     imageDataUrls,
     prompt,
-    presetId: appConfig.vision.activePresetId
+    presetId: selectedPreset.id
   });
 }
 
@@ -1276,8 +1389,16 @@ async function captureScreenshot() {
 async function analyzeScreenshotBatch() {
   if (isGenerating || currentScreenshots.length === 0) return;
 
+  const screenshots = [...currentScreenshots];
+  lastAnalyzedScreenshots = screenshots;
+  currentScreenshots = [];
+  selectedScreenshotIndex = -1;
+  renderScreenshotBatch();
+  setGenerating(true, 'vision', false);
+  setCaptureStatus('正在准备分析截图…');
+
   try {
-    await analyzeScreenshots();
+    await analyzeScreenshots(screenshots);
   } catch (error) {
     setGenerating(false);
     setCaptureStatus('分析失败', true);
@@ -1287,9 +1408,18 @@ async function analyzeScreenshotBatch() {
 }
 
 async function retryScreenshotBatch() {
-  if (isGenerating || currentScreenshots.length === 0) return;
+  if (isGenerating) return;
+  const screenshots = [...(currentScreenshots.length ? currentScreenshots : lastAnalyzedScreenshots)];
+  if (!screenshots.length) return;
+  lastAnalyzedScreenshots = screenshots;
+  currentScreenshots = [];
+  selectedScreenshotIndex = -1;
+  renderScreenshotBatch();
+  setGenerating(true, 'vision', false);
+  setCaptureStatus('正在准备重试分析…');
+
   try {
-    await analyzeScreenshots();
+    await analyzeScreenshots(screenshots);
   } catch (error) {
     setGenerating(false);
     setCaptureStatus('分析失败', true);
@@ -1301,6 +1431,11 @@ async function retryScreenshotBatch() {
 async function sendFollowUp() {
   const text = elements.chatInput.value.trim();
   if (!text || isGenerating || !appConfig) return;
+  const selectedPreset = selectedModelPreset('chat');
+  if (!selectedPreset || !selectedPreset.baseUrl || !selectedPreset.model) {
+    setCaptureStatus('请选择已配置 API 地址和模型名称的对话模型', true);
+    return;
+  }
   if (!hasAnswer()) {
     setCaptureStatus('请先完成一次截图分析', true);
     return;
@@ -1325,17 +1460,20 @@ async function sendFollowUp() {
   elements.chatHint.textContent = '正在生成回答…';
   scrollThreadToBottom();
 
-  const attachImages = elements.attachImageInput.checked && currentScreenshots.length > 0;
+  const screenshotsToAttach = currentScreenshots.length ? currentScreenshots : lastAnalyzedScreenshots;
+  const attachImages = elements.attachImageInput.checked && screenshotsToAttach.length > 0;
+  const imageDataUrls = attachImages ? await Promise.all(screenshotsToAttach.map(compressImage)) : [];
   await api.chatFollowUp({
     history,
-    imageDataUrls: attachImages ? await Promise.all(currentScreenshots.map(compressImage)) : [],
-    presetId: appConfig.chat.activePresetId
+    imageDataUrls,
+    presetId: selectedPreset.id
   });
 }
 
 function clearAll() {
   if (isGenerating) return;
   currentScreenshots = [];
+  lastAnalyzedScreenshots = [];
   selectedScreenshotIndex = -1;
   renderScreenshotBatch();
   setCaptureStatus(remoteConnected ? '远程屏幕连接中' : (monitorStarted ? '屏幕监听中，可添加截图' : '等待截图'));
@@ -1380,6 +1518,14 @@ elements.stopButton.addEventListener('click', async () => {
   await api.stopAnalysis();
 });
 elements.sendChatButton.addEventListener('click', sendFollowUp);
+elements.visionModelSelect.addEventListener('change', (event) => {
+  selectedModelPresetIds.vision = event.target.value;
+  updateModelChips();
+});
+elements.chatModelSelect.addEventListener('change', (event) => {
+  selectedModelPresetIds.chat = event.target.value;
+  updateModelChips();
+});
 elements.chatInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();

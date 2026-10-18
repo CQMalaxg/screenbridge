@@ -4,13 +4,28 @@ window.SCREENBRIDGE_BROWSER_WORKBENCH = true;
 
 const CONFIG_KEY = 'screenbridge.browser.config.v1';
 const KEYS_KEY = 'screenbridge.browser.keys.v1';
+const LEGACY_PAIR_SESSION_KEY = 'screenbridge.browser.pair-session.v1';
+const LAST_DEVICE_PREFIX = 'screenbridge.browser.last-device.v1.';
+const AUTO_RECONNECT_PREFIX = 'screenbridge.browser.auto-reconnect.v1.';
 const eventHandlers = new Map();
 const sessionKeys = new Map();
 let pairSocket = null;
 let pairConnected = false;
+let pairReconnectTimer = null;
+let pairStableTimer = null;
+let pairReconnectAttempt = 0;
+let pairManuallyDisconnected = false;
+let pairTarget = null;
+let activeDeviceId = '';
+let accountUser = null;
+let accountCsrfToken = '';
+let accountDevices = [];
+let accountMode = 'login';
 let pendingFrame = null;
 let activeAbortController = null;
 let runtimeConfig = null;
+
+try { localStorage.removeItem(LEGACY_PAIR_SESSION_KEY); } catch {}
 
 const defaultSystemPrompt = '你是一个面试练习助手。请准确阅读用户提供的一张或多张截图，先给出结论，再给出简洁、可直接使用的回答。信息不足时请明确指出。';
 const defaultChatSystemPrompt = '你是屏桥的追问助手。用户会基于本轮一张或多张屏幕截图和视觉模型已经给出的回答继续提问。请结合上下文直接作答：结论先行，解释简洁，需要代码时只给关键片段。上下文不足以确定答案时，请说明缺少什么信息。';
@@ -220,13 +235,15 @@ function setPairStatus(message, state) {
     status.classList.toggle('is-connected', state === 'connected');
     status.classList.toggle('is-error', state === 'error');
   }
-  const connectButton = document.getElementById('pairButton');
+  const connectButton = document.getElementById('connectDeviceButton');
   const disconnectButton = document.getElementById('disconnectPairButton');
   const codeInput = document.getElementById('pairCodeInput');
   const captureButton = document.getElementById('addScreenshotButton');
-  if (connectButton) connectButton.disabled = state === 'connecting' || state === 'connected';
-  if (disconnectButton) disconnectButton.hidden = state !== 'connected';
-  if (codeInput) codeInput.disabled = state === 'connecting' || state === 'connected';
+  const pairButton = document.getElementById('pairButton');
+  if (connectButton) connectButton.disabled = state === 'connecting' || state === 'connected' || !accountUser;
+  if (disconnectButton) disconnectButton.hidden = !pairSocket;
+  if (pairButton) pairButton.disabled = state === 'connecting' || state === 'connected' || !accountUser;
+  if (codeInput) codeInput.disabled = state === 'connecting' || state === 'connected' || !accountUser;
   if (captureButton) captureButton.disabled = state !== 'connected';
   const shortcut = document.getElementById('shortcutStatus');
   const captureStatus = document.getElementById('captureStatus');
@@ -245,17 +262,67 @@ function rejectPendingFrame(message) {
   pending.reject(new Error(message));
 }
 
-function disconnectPair(message, isError) {
+function cancelPairReconnect() {
+  if (pairReconnectTimer !== null) clearTimeout(pairReconnectTimer);
+  pairReconnectTimer = null;
+}
+
+function accountStorageKey(prefix) {
+  return accountUser ? `${prefix}${accountUser.id}` : '';
+}
+
+function readLastDeviceId() {
+  const key = accountStorageKey(LAST_DEVICE_PREFIX);
+  try { return key ? localStorage.getItem(key) || '' : ''; } catch { return ''; }
+}
+
+function saveLastDeviceId(deviceId) {
+  activeDeviceId = deviceId || '';
+  const key = accountStorageKey(LAST_DEVICE_PREFIX);
+  try { if (key && deviceId) localStorage.setItem(key, deviceId); } catch {}
+}
+
+function clearLastDeviceId() {
+  const key = accountStorageKey(LAST_DEVICE_PREFIX);
+  try { if (key) localStorage.removeItem(key); } catch {}
+  activeDeviceId = '';
+}
+
+function autoReconnectEnabled() {
+  const key = accountStorageKey(AUTO_RECONNECT_PREFIX);
+  try { return !key || localStorage.getItem(key) !== 'false'; } catch { return true; }
+}
+
+function setAutoReconnect(enabled) {
+  const key = accountStorageKey(AUTO_RECONNECT_PREFIX);
+  try { if (key) localStorage.setItem(key, enabled ? 'true' : 'false'); } catch {}
+}
+
+function closePairSocket(notify = false) {
+  if (!pairSocket) return;
+  const socket = pairSocket;
+  pairSocket = null;
+  socket.onopen = null;
+  socket.onmessage = null;
+  socket.onclose = null;
+  socket.onerror = null;
+  if (notify && socket.readyState === WebSocket.OPEN) {
+    try { socket.send(JSON.stringify({ type: 'disconnect' })); } catch {}
+  }
+  socket.close();
+}
+
+function disconnectPair(message, isError, options = {}) {
+  pairManuallyDisconnected = options.manual !== false;
+  cancelPairReconnect();
+  if (pairStableTimer !== null) clearTimeout(pairStableTimer);
+  pairStableTimer = null;
+  if (pairManuallyDisconnected) setAutoReconnect(false);
+  pairTarget = null;
   pairConnected = false;
   clearSourceConfig();
   rejectPendingFrame(message || '配对连接已断开。');
-  if (pairSocket) {
-    const socket = pairSocket;
-    pairSocket = null;
-    socket.onclose = null;
-    socket.onerror = null;
-    socket.close();
-  }
+  closePairSocket(options.notify === true);
   setPairStatus(message || '尚未连接', isError ? 'error' : 'disconnected');
 }
 
@@ -264,19 +331,45 @@ function normalizeCode(value) {
 }
 
 function connectPair(code) {
-  disconnectPair('', false);
   const normalized = normalizeCode(code);
   if (!/^[A-HJ-NP-Z2-9]{8}$/.test(normalized)) {
     setPairStatus('配对码应为 8 位字母和数字。', 'error');
     return;
   }
-  setPairStatus('正在连接…', 'connecting');
+  if (!accountUser) return setPairStatus('请先登录账号。', 'error');
+  setAutoReconnect(true);
+  startPairSocket({ type: 'join', code: normalized }, false);
+}
+
+function connectDevice(deviceId, automatic = false) {
+  if (!accountUser) return setPairStatus('请先登录账号。', 'error');
+  if (!/^[0-9a-f-]{36}$/i.test(String(deviceId || ''))) return;
+  if (!automatic) setAutoReconnect(true);
+  startPairSocket({ type: 'connect-device', deviceId }, automatic);
+}
+
+function startPairSocket(request, automatic = false) {
+  cancelPairReconnect();
+  if (pairStableTimer !== null) clearTimeout(pairStableTimer);
+  pairStableTimer = null;
+  closePairSocket(true);
+  if (!automatic) pairReconnectAttempt = 0;
+  pairManuallyDisconnected = false;
+  pairTarget = request;
+  pairConnected = false;
+  clearSourceConfig();
+  setPairStatus(automatic ? '正在自动恢复连接…' : '正在连接…', 'connecting');
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new WebSocket(protocol + '//' + location.host + '/ws');
+  let socketError = '';
   pairSocket = socket;
   socket.binaryType = 'blob';
-  socket.onopen = () => socket.send(JSON.stringify({ type: 'join', code: normalized }));
+  socket.onopen = () => {
+    if (pairSocket !== socket) return;
+    socket.send(JSON.stringify(request));
+  };
   socket.onmessage = async (event) => {
+    if (pairSocket !== socket) return;
     if (typeof event.data !== 'string') {
       if (!pendingFrame) return;
       const pending = pendingFrame;
@@ -295,8 +388,18 @@ function connectPair(code) {
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
     if (message.type === 'joined') {
-      pairConnected = true;
-      setPairStatus('已连接采集电脑；会话将持续到浏览器或采集端断开', 'connected');
+      pairConnected = message.sourceOnline !== false;
+      if (pairStableTimer !== null) clearTimeout(pairStableTimer);
+      pairStableTimer = setTimeout(() => {
+        pairStableTimer = null;
+        if (pairSocket === socket && socket.readyState === WebSocket.OPEN) pairReconnectAttempt = 0;
+      }, 30_000);
+      if (message.deviceId) saveLastDeviceId(message.deviceId);
+      if (request.type === 'join' && message.deviceId) pairTarget = { type: 'connect-device', deviceId: message.deviceId };
+      if (request.type === 'join') refreshAccountDevices(false).catch(() => {});
+      const codeInput = document.getElementById('pairCodeInput');
+      if (codeInput) codeInput.value = '';
+      setPairStatus(pairConnected ? '已连接采集电脑；网页或网络断开后会自动恢复' : '采集电脑离线，等待自动重连', pairConnected ? 'connected' : 'connecting');
     } else if (message.type === 'source-config') {
       applySourceConfig(message.config);
     } else if (message.type === 'frame') {
@@ -306,28 +409,224 @@ function connectPair(code) {
     } else if (message.type === 'frame-timeout' || message.type === 'frame-error' || message.type === 'error') {
       rejectPendingFrame(message.message || '采集截图失败。');
       if (message.type === 'error') {
+        socketError = message.message || '连接认证失败。';
         pairConnected = false;
         clearSourceConfig();
+        if (message.code === 'DEVICE_NOT_FOUND') {
+          clearLastDeviceId();
+          pairTarget = null;
+          refreshAccountDevices(false).catch(() => {});
+        } else if (message.message && message.message.includes('已绑定') && request.type === 'join') {
+          resolveAlreadyBoundDevice(request.code, socket);
+          return;
+        } else if (/请先登录/.test(message.message || '')) {
+          pairTarget = null;
+          refreshAccount(false).catch(() => {});
+        } else if (message.code !== 'RATE_LIMITED') {
+          pairTarget = null;
+        }
         setPairStatus(message.message || '配对失败。', 'error');
       }
+    } else if (message.type === 'source-offline') {
+      pairConnected = false;
+      rejectPendingFrame(message.message || '采集电脑已离线。');
+      setPairStatus(message.message || '采集电脑离线，等待自动重连', 'connecting');
     } else if (message.type === 'source-disconnected') {
       pairConnected = false;
-      clearSourceConfig();
       rejectPendingFrame(message.message || '采集电脑已断开。');
       setPairStatus(message.message || '采集电脑已断开。', 'error');
     } else if (message.type === 'source-connected') {
       pairConnected = true;
       setPairStatus('采集电脑已重新连接', 'connected');
+      refreshAccountDevices(false).catch(() => {});
     }
   };
   socket.onclose = (event) => {
-    if (pairSocket === socket) pairSocket = null;
+    if (pairSocket !== socket) return;
+    pairSocket = null;
     pairConnected = false;
+    if (pairStableTimer !== null) clearTimeout(pairStableTimer);
+    pairStableTimer = null;
     clearSourceConfig();
-    rejectPendingFrame(event.reason || '连接已断开，配对码可能已过期。');
-    setPairStatus(event.reason || '连接已断开，请使用新的配对码重新连接。', 'error');
+    rejectPendingFrame(event.reason || '连接已断开，正在准备恢复。');
+    if (pairManuallyDisconnected || !pairTarget) {
+      setPairStatus(socketError || event.reason || '已断开连接', socketError ? 'error' : 'disconnected');
+      return;
+    }
+    if (event.reason && /(设备已撤销|账号已退出|账号会话已失效)/.test(event.reason)) {
+      if (event.reason.includes('设备已撤销')) clearLastDeviceId();
+      if (event.reason.includes('账号')) refreshAccount(false).catch(() => {});
+      setPairStatus(event.reason, 'error');
+      return;
+    }
+    if (accountUser && autoReconnectEnabled()) {
+      const baseDelay = Math.min(1000 * (2 ** Math.min(pairReconnectAttempt, 5)), 30_000);
+      const delay = Math.round(baseDelay * (0.75 + Math.random() * 0.5));
+      pairReconnectAttempt += 1;
+      setPairStatus('连接中断，正在准备自动恢复…', 'connecting');
+      pairReconnectTimer = setTimeout(() => {
+        pairReconnectTimer = null;
+        if (!pairSocket && pairTarget && !pairManuallyDisconnected) startPairSocket(pairTarget, true);
+      }, delay);
+    } else {
+      setPairStatus(event.reason || '连接已断开，请登录后重试。', 'error');
+    }
   };
-  socket.onerror = () => setPairStatus('无法连接中继服务，请检查网络后重试。', 'error');
+  socket.onerror = () => {
+    if (pairSocket === socket) setPairStatus('无法连接中继服务，请检查网络后重试。', 'error');
+  };
+}
+
+async function resolveAlreadyBoundDevice(code, oldSocket) {
+  if (pairSocket !== oldSocket) return;
+  const requestTarget = pairTarget;
+  pairSocket = null;
+  oldSocket.onopen = null;
+  oldSocket.onmessage = null;
+  oldSocket.onclose = null;
+  oldSocket.onerror = null;
+  oldSocket.close();
+  await refreshAccountDevices(false);
+  if (pairSocket || pairTarget !== requestTarget || pairManuallyDisconnected
+      || !accountUser || !autoReconnectEnabled()) return;
+  const matched = accountDevices.find((device) => normalizeCode(device.code) === code);
+  if (matched) connectDevice(matched.id, true);
+  else setPairStatus('该设备已绑定到其他账号。', 'error');
+}
+
+function setAuthMode(mode) {
+  accountMode = mode === 'register' ? 'register' : 'login';
+  const loginButton = document.getElementById('loginModeButton');
+  const registerButton = document.getElementById('registerModeButton');
+  const submitButton = document.getElementById('accountSubmitButton');
+  const passwordInput = document.getElementById('accountPasswordInput');
+  if (loginButton) loginButton.classList.toggle('is-active', accountMode === 'login');
+  if (registerButton) registerButton.classList.toggle('is-active', accountMode === 'register');
+  if (submitButton) submitButton.textContent = accountMode === 'register' ? '创建账号' : '登录';
+  if (passwordInput) passwordInput.autocomplete = accountMode === 'register' ? 'new-password' : 'current-password';
+}
+
+function setAccountStatus(message, success = false) {
+  const status = document.getElementById('accountStatus');
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle('is-ok', success);
+}
+
+function renderAccount() {
+  const loginPanel = document.getElementById('accountLoginPanel');
+  const devicesPanel = document.getElementById('accountDevicesPanel');
+  const pairForm = document.getElementById('pairForm');
+  const identity = document.getElementById('accountIdentity');
+  if (loginPanel) loginPanel.hidden = Boolean(accountUser);
+  if (devicesPanel) devicesPanel.hidden = !accountUser;
+  if (pairForm) pairForm.hidden = !accountUser;
+  if (identity) identity.textContent = accountUser ? `已登录：${accountUser.username}` : '';
+  setPairStatus(pairSocket ? (pairConnected ? '已连接采集电脑' : '正在连接或等待采集电脑') : (accountUser ? '尚未连接' : '请先登录'), pairSocket ? (pairConnected ? 'connected' : 'connecting') : 'disconnected');
+}
+
+async function refreshAccountDevices(autoConnect = true) {
+  if (!accountUser) return [];
+  const response = await fetch('/api/devices', { cache: 'no-store', credentials: 'same-origin' });
+  if (response.status === 401) {
+    accountUser = null;
+    accountCsrfToken = '';
+    accountDevices = [];
+    renderAccount();
+    return [];
+  }
+  if (!response.ok) throw new Error('无法读取账号设备列表。');
+  const body = await response.json();
+  accountDevices = Array.isArray(body.devices) ? body.devices : [];
+  const select = document.getElementById('accountDeviceSelect');
+  if (select) {
+    while (select.firstChild) select.removeChild(select.firstChild);
+    for (const device of accountDevices) {
+      const option = document.createElement('option');
+      option.value = device.id;
+      option.textContent = `采集电脑 · ${device.codeHint} · ${device.online ? '在线' : '离线'}`;
+      select.appendChild(option);
+    }
+  }
+  const saved = readLastDeviceId();
+  const selected = accountDevices.some((device) => device.id === saved) ? saved : (accountDevices[0]?.id || '');
+  if (select) select.value = selected;
+  if (accountDevices.length === 0) {
+    setAccountStatus('尚无已绑定设备。首次连接需要从采集电脑读取一次配对码。', true);
+  } else {
+    setAccountStatus('', true);
+    if (!saved && selected) saveLastDeviceId(selected);
+    if (autoConnect && selected && autoReconnectEnabled() && !pairSocket) connectDevice(selected, true);
+  }
+  return accountDevices;
+}
+
+async function refreshAccount(autoConnect = true) {
+  const response = await fetch('/api/auth/session', { cache: 'no-store', credentials: 'same-origin' });
+  if (!response.ok) throw new Error('无法检查账号会话。');
+  const body = await response.json();
+  accountUser = body.user || null;
+  accountCsrfToken = body.csrfToken || '';
+  if (!accountUser && pairSocket) disconnectPair('登录状态已失效，请重新登录。', true, { manual: true });
+  renderAccount();
+  if (accountUser) await refreshAccountDevices(autoConnect);
+  return accountUser;
+}
+
+async function authenticateAccount(event) {
+  event.preventDefault();
+  const username = document.getElementById('accountUsernameInput')?.value || '';
+  const password = document.getElementById('accountPasswordInput')?.value || '';
+  const response = await fetch(`/api/auth/${accountMode}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ username, password })
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setAccountStatus(body.error || '登录失败。');
+    return;
+  }
+  const passwordInput = document.getElementById('accountPasswordInput');
+  if (passwordInput) passwordInput.value = '';
+  await refreshAccount(true);
+  setAccountStatus('账号已登录。', true);
+}
+
+async function logoutAccount() {
+  const response = await fetch('/api/auth/logout', {
+    method: 'POST',
+    headers: { 'X-CSRF-Token': accountCsrfToken },
+    credentials: 'same-origin'
+  });
+  if (!response.ok) {
+    setAccountStatus('退出失败，请刷新页面后重试。');
+    return;
+  }
+  if (pairSocket) disconnectPair('已退出账号', false, { manual: false });
+  accountUser = null;
+  accountCsrfToken = '';
+  accountDevices = [];
+  renderAccount();
+}
+
+async function revokeSelectedDevice() {
+  const select = document.getElementById('accountDeviceSelect');
+  const deviceId = select?.value || '';
+  if (!deviceId || !window.confirm('撤销后，该采集电脑需要重新配对才能连接。确定撤销吗？')) return;
+  const response = await fetch(`/api/devices/${deviceId}`, {
+    method: 'DELETE',
+    headers: { 'X-CSRF-Token': accountCsrfToken },
+    credentials: 'same-origin'
+  });
+  if (!response.ok) {
+    setAccountStatus('撤销失败，请刷新页面后重试。');
+    return;
+  }
+  if (deviceId === activeDeviceId) disconnectPair('设备已撤销', true, { manual: true });
+  if (deviceId === readLastDeviceId()) clearLastDeviceId();
+  await refreshAccountDevices(false);
 }
 
 function captureScreen() {
@@ -518,7 +817,7 @@ async function streamChatFollowUp(payload, config) {
       input: history.map((item, index) => {
         const content = [];
         if (index === 0 && images.length) content.push(...images.map((image) => ({ type: 'input_image', image_url: image, detail: 'high' })));
-        content.push({ type: 'input_text', text: item.content });
+        content.push({ type: item.role === 'assistant' ? 'output_text' : 'input_text', text: item.content });
         return { role: item.role, content };
       })
     };
@@ -533,20 +832,20 @@ async function streamChatFollowUp(payload, config) {
   await streamCompletion({ config, apiBackend: backend, requestBody, eventName: 'chat' });
 }
 
-function buildPresetQueue(group, requestedPresetId, autoFallback) {
+function buildPresetQueue(group, requestedPresetId) {
   const presets = Array.isArray(group && group.presets) ? group.presets : [];
   if (!presets.length) throw new Error('当前模型组没有可用预设，请先在设置中新增模型。');
-  const selected = presets.find((preset) => preset.id === requestedPresetId)
-    || presets.find((preset) => preset.id === group.activePresetId)
-    || presets[0];
-  if (!autoFallback) return [selected];
-  const fallback = presets.filter((preset) => preset.id !== selected.id && preset.enabled)
-    .sort((left, right) => left.priority - right.priority);
-  return [selected, ...fallback];
+  if (requestedPresetId) {
+    const selected = presets.find((preset) => preset.id === requestedPresetId);
+    if (!selected) throw new Error('所选模型已从同步配置中移除，请重新选择后发送。');
+    return [selected];
+  }
+  const selected = presets.find((preset) => preset.id === group.activePresetId) || presets[0];
+  return [selected];
 }
 
 async function runWithFallback(args) {
-  const queue = buildPresetQueue(args.group, args.requestedPresetId, args.autoFallback);
+  const queue = buildPresetQueue(args.group, args.requestedPresetId);
   const failures = [];
   for (let index = 0; index < queue.length; index += 1) {
     const preset = queue[index];
@@ -676,6 +975,8 @@ window.assistantAPI = {
 const pairForm = document.getElementById('pairForm');
 const pairCodeInput = document.getElementById('pairCodeInput');
 const disconnectPairButton = document.getElementById('disconnectPairButton');
+const accountForm = document.getElementById('accountForm');
+const accountDeviceSelect = document.getElementById('accountDeviceSelect');
 if (pairForm) {
   pairForm.addEventListener('submit', (event) => {
     event.preventDefault();
@@ -685,6 +986,20 @@ if (pairForm) {
 if (pairCodeInput) pairCodeInput.addEventListener('input', () => {
   pairCodeInput.value = pairCodeInput.value.toUpperCase().replace(/[^A-HJ-NP-Z2-9-]/g, '').slice(0, 9);
 });
-if (disconnectPairButton) disconnectPairButton.addEventListener('click', () => disconnectPair('已断开连接', false));
-setPairStatus('尚未连接', 'disconnected');
-window.addEventListener('beforeunload', () => disconnectPair('', false));
+if (disconnectPairButton) disconnectPairButton.addEventListener('click', () => disconnectPair('已断开连接', false, { notify: true }));
+if (accountForm) accountForm.addEventListener('submit', (event) => authenticateAccount(event).catch(() => setAccountStatus('无法连接账号服务。')));
+document.getElementById('loginModeButton')?.addEventListener('click', () => setAuthMode('login'));
+document.getElementById('registerModeButton')?.addEventListener('click', () => setAuthMode('register'));
+document.getElementById('connectDeviceButton')?.addEventListener('click', () => connectDevice(accountDeviceSelect?.value || ''));
+document.getElementById('logoutButton')?.addEventListener('click', () => logoutAccount().catch(() => setAccountStatus('无法连接账号服务。')));
+document.getElementById('revokeDeviceButton')?.addEventListener('click', () => revokeSelectedDevice().catch(() => setAccountStatus('无法连接账号服务。')));
+setAuthMode('login');
+setPairStatus('正在检查登录状态…', 'connecting');
+refreshAccount(true).catch(() => setPairStatus('无法连接账号服务。', 'error'));
+window.addEventListener('online', () => {
+  if (pairTarget && !pairSocket && !pairManuallyDisconnected && accountUser && autoReconnectEnabled()) {
+    cancelPairReconnect();
+    startPairSocket(pairTarget, true);
+  }
+});
+window.addEventListener('beforeunload', () => closePairSocket(false));

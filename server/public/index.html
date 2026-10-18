@@ -37,7 +37,34 @@
           </div>
           <span class="pair-status" id="pairStatus" role="status" aria-live="polite">尚未连接</span>
         </div>
-        <form class="browser-pair-form" id="pairForm">
+        <section class="account-panel" id="accountLoginPanel" aria-label="账号登录">
+          <div class="account-mode" role="group" aria-label="登录方式">
+            <button class="account-mode-button is-active" id="loginModeButton" type="button">登录</button>
+            <button class="account-mode-button" id="registerModeButton" type="button">创建账号</button>
+          </div>
+          <form id="accountForm" class="account-form">
+            <label for="accountUsernameInput">账号</label>
+            <input id="accountUsernameInput" name="username" autocomplete="username" maxlength="32" required />
+            <label for="accountPasswordInput">密码</label>
+            <input id="accountPasswordInput" name="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required />
+            <button class="primary-button" id="accountSubmitButton" type="submit">登录</button>
+          </form>
+          <p class="account-status" id="accountStatus" role="status" aria-live="polite"></p>
+          <p class="hint account-recovery-note">账号密码没有找回功能，请妥善保管。</p>
+        </section>
+        <section class="account-devices" id="accountDevicesPanel" hidden>
+          <div class="account-toolbar">
+            <span id="accountIdentity"></span>
+            <button class="ghost-button" id="logoutButton" type="button">退出账号</button>
+          </div>
+          <div class="account-device-controls">
+            <label for="accountDeviceSelect">已绑定设备</label>
+            <select id="accountDeviceSelect" aria-label="选择已绑定设备"></select>
+            <button class="secondary-button" id="connectDeviceButton" type="button">连接设备</button>
+            <button class="ghost-button" id="revokeDeviceButton" type="button">撤销</button>
+          </div>
+        </section>
+        <form class="browser-pair-form" id="pairForm" hidden>
           <label class="pair-code-label" for="pairCodeInput">输入屏桥应用显示的配对码</label>
           <div class="pair-code-controls">
             <input id="pairCodeInput" inputmode="text" autocomplete="one-time-code" maxlength="9" placeholder="例如 ABCD-EFGH" aria-label="配对码" required />
@@ -45,7 +72,7 @@
             <button class="ghost-button" id="disconnectPairButton" type="button" hidden>断开</button>
           </div>
         </form>
-        <div class="hint">配对码需在 15 分钟内完成首次连接。连接成功后不会定时断开；关闭浏览器/采集端或网络中断后，需要用新配对码重新连接。连接后可连续添加多张截图，并自动同步采集端的完整设置（API 地址、协议、密钥、代理、模型、预设和提示词）。</div>
+        <div class="hint">配对码只用于首次绑定账号；绑定后从设备列表连接。网页刷新、换浏览器或短暂断网后自动恢复，不需再次输入配对码。采集端离线时网页保持等待，恢复后继续使用。</div>
       </section>
 
       <section class="workspace">
@@ -95,6 +122,12 @@
             </div>
             <div class="prompt-preset-status" id="visionPromptPresetStatus" aria-live="polite"></div>
             <textarea id="promptInput" rows="5">请阅读这些截图中的题目，先给出结论，再给出简洁、可直接使用的回答。若是编程题，请说明思路、复杂度和关键代码。</textarea>
+            <label class="model-choice" for="visionModelSelect">
+              本次分析使用
+              <select id="visionModelSelect" aria-label="本次分析使用的视觉模型">
+                <option value="">选择视觉模型</option>
+              </select>
+            </label>
             <div class="hint">建议只截取题目相关区域，图片越小，响应通常越快。</div>
           </section>
         </div>
@@ -115,6 +148,7 @@
             <div class="thread" id="thread">
               <div class="thread-empty" id="threadEmpty">截图分析后，回答会显示在这里；随后可以针对回答继续追问。</div>
             </div>
+            <div id="answerSelectionMagnifier" class="answer-selection-magnifier" role="note" aria-label="选中文本放大预览" hidden></div>
 
             <div class="composer">
               <div class="prompt-preset-toolbar chat-prompt-preset-toolbar">
@@ -132,6 +166,12 @@
                 placeholder="针对上面的回答继续追问…（Ctrl + Enter 发送）"
                 disabled
               ></textarea>
+              <label class="model-choice" for="chatModelSelect">
+                本次追问使用
+                <select id="chatModelSelect" aria-label="本次追问使用的对话模型">
+                  <option value="">选择对话模型</option>
+                </select>
+              </label>
               <div class="composer-row">
                 <label class="check-field composer-check">
                   <input id="attachImageInput" type="checkbox" />
@@ -162,7 +202,7 @@
             <button class="ghost-button" id="stopCloudShareButton" disabled>停止共享</button>
           </div>
           <div class="share-info" id="cloudShareInfo">点击“创建配对码”，再在查看设备的浏览器中打开页面并输入配对码。</div>
-          <div class="hint">配对码需在 15 分钟内完成首次连接；连接成功后不会定时断开。关闭浏览器/采集端或网络中断后旧码失效，每组配对只允许一个查看设备。</div>
+          <div class="hint">配对码需在 15 分钟内完成首次连接；同一浏览器刷新、重新打开或短暂断网后会自动恢复，配对码不能重复使用。采集端停止共享或中继重启后需重新配对；每组配对只允许一个查看设备。</div>
         </section>
 
         <section class="card lan-card">
@@ -237,16 +277,6 @@
             预设名称
             <input id="stPresetNameInput" type="text" placeholder="例如 主力模型" />
           </label>
-          <div class="settings-row">
-            <label>
-              请求优先级
-              <input id="stPriorityInput" type="number" min="1" max="999" step="1" />
-            </label>
-            <label class="check-field">
-              <input id="stPresetEnabledInput" type="checkbox" />
-              <span>参与自动切换</span>
-            </label>
-          </div>
           <label>
             API 地址
             <input id="stBaseUrlInput" type="url" placeholder="https://api.example.com/v1" />
@@ -290,11 +320,7 @@
             <div class="hint">追问时，截图与上一轮回答会作为上下文一起发送。</div>
           </div>
 
-          <label class="check-field auto-fallback-field">
-            <input id="stAutoFallbackInput" type="checkbox" />
-            <span>请求失败时按优先级自动尝试同组其他已启用预设</span>
-          </label>
-          <div class="security-note">网页复用桌面端模型与提示词流程。连接采集端后，API 地址、协议、密钥、代理、模型、预设、主用项、优先级、启用状态、自动切换、系统提示词和回答/追问提示词预设都会同步显示，设置保持只读。密钥仅通过已建立的配对连接传输，不写入中继磁盘；模型请求直接发给模型服务，不经过屏桥服务器。未连接采集端时，密钥默认只保留在当前页面；勾选后存入此浏览器。HTTP 代理请使用此设备的浏览器/系统网络设置。</div>
+          <div class="security-note">网页复用采集端同步的模型配置。可以保存多个模型，并在每次分析或追问前选择本次使用的模型；当前请求只调用所选模型，不按优先级自动顺延。连接采集端后设置保持只读。密钥仅通过已建立的配对连接传输，不写入中继磁盘；模型请求直接发给模型服务，不经过屏桥服务器。</div>
         </div>
 
         <div class="modal-foot">

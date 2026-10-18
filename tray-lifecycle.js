@@ -1,6 +1,6 @@
 'use strict';
 
-function createTrayLifecycle({ app, Tray, Menu, getWindow, iconPath }) {
+function createTrayLifecycle({ app, Tray, Menu, getWindow, iconPath, canQuit = () => true }) {
   let appIsQuitting = false;
   const tray = new Tray(iconPath);
 
@@ -25,6 +25,7 @@ function createTrayLifecycle({ app, Tray, Menu, getWindow, iconPath }) {
   tray.on('double-click', showWindow);
 
   app.on('before-quit', () => {
+    if (!canQuit()) return;
     appIsQuitting = true;
     tray.destroy();
   });

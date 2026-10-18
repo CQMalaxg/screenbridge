@@ -28,7 +28,7 @@ class FakeTray extends EventEmitter {
   destroy() { this.destroyed = true; }
 }
 
-function makeLifecycle() {
+function makeLifecycle(canQuit) {
   const app = new EventEmitter();
   app.quit = () => app.emit('before-quit');
   const window = new FakeWindow();
@@ -47,6 +47,7 @@ function makeLifecycle() {
     },
     Menu,
     getWindow: () => window,
+    canQuit,
     iconPath: 'assets/icon.ico'
   });
   lifecycle.attachWindow(window);
@@ -82,4 +83,16 @@ test('the explicit tray exit allows the window to close and destroys the tray ic
   window.emit('close', { preventDefault() { prevented = true; } });
   assert.equal(prevented, false);
   assert.equal(window.calls.includes('hide'), false);
+});
+
+test('the tray remains available while a cloud stop cannot safely exit', () => {
+  const { app, tray, window } = makeLifecycle(() => false);
+  tray.menu[2].click();
+
+  assert.equal(tray.destroyed, undefined);
+  let prevented = false;
+  window.emit('close', { preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(window.calls.includes('hide'), true);
+  assert.ok(app.listenerCount('before-quit') > 0);
 });

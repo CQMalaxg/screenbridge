@@ -1,6 +1,6 @@
 {
   "name": "screenbridge",
-  "version": "0.4.2",
+  "version": "0.4.5",
   "description": "屏桥 ScreenBridge - LAN screen bridge and vision LLM assistant",
   "author": "CQMalaxg",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
-    "check": "node --check main.js && node --check preload.js && node --check tray-lifecycle.js && node --check renderer/renderer.js && node --check server/relay.js && node --check server/public/viewer.js && node --check server/public/workbench.js",
+    "check": "node --check main.js && node --check preload.js && node --check cloud-device-store.js && node --check cloud-reconnect-policy.js && node --check cloud-stop-policy.js && node --check cloud-auto-start.js && node --check tray-lifecycle.js && node --check renderer/renderer.js && node --check server/relay.js && node --check server/security-store.js && node --check server/public/viewer.js && node --check server/public/workbench.js",
     "test": "node --test server/test/*.test.js test/*.test.js"
   },
   "build": {
@@ -18,6 +18,10 @@
     "files": [
       "main.js",
       "preload.js",
+      "cloud-device-store.js",
+      "cloud-reconnect-policy.js",
+      "cloud-stop-policy.js",
+      "cloud-auto-start.js",
       "tray-lifecycle.js",
       "renderer/**/*",
       "assets/**/*",

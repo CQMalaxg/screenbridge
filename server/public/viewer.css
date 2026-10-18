@@ -155,8 +155,11 @@ textarea:focus, input:focus, select:focus { border-color: #938bf7; box-shadow: 0
 .message-body pre code { background: transparent; padding: 0; }
 .message-body a { color: #a9a2ff; }
 .message-body hr { border: 0; border-top: 1px solid #343b55; margin: 14px 0; }
+.answer-selection-magnifier { position: fixed; z-index: 1000; width: max-content; max-width: min(560px, calc(100vw - 24px)); max-height: min(42vh, 320px); overflow: auto; border: 1px solid #d9d5ff; border-radius: 14px; padding: 13px 17px; color: #202642; background: #fff; box-shadow: 0 12px 34px rgba(24,29,52,.24), 0 0 0 3px rgba(118,108,244,.12); font-size: clamp(18px, 1.8vw, 23px); font-weight: 650; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; user-select: none; }
 
 .composer { margin-top: 14px; }
+.model-choice { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 10px; margin: 10px 0 4px; color: #71798b; }
+.model-choice select { min-width: 0; width: 100%; margin: 0; }
 .prompt-preset-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 7px; align-items: center; margin-bottom: 5px; }
 .prompt-preset-toolbar select, .prompt-preset-toolbar button { margin: 0; }
 .prompt-preset-toolbar select { min-width: 0; padding: 8px 10px; }
@@ -295,6 +298,23 @@ label input { display: block; margin-top: 6px; }
 .pair-code-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
 .pair-code-controls input, .pair-code-controls button { margin: 0; }
 .pair-code-controls input { max-width: 320px; letter-spacing: .12em; text-transform: uppercase; }
+.account-panel, .account-devices { grid-column: 1 / -1; min-width: 0; }
+.account-panel { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; align-items: center; }
+.account-mode { display: flex; gap: 6px; }
+.account-mode-button { width: auto; margin: 0; padding: 8px 12px; border: 1px solid #e1e4ed; border-radius: 6px; color: #5d6576; background: #fff; font-size: 12px; }
+.account-mode-button.is-active { border-color: #4d8575; color: #286b58; background: #edf7f3; }
+.account-form { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto minmax(120px, 1fr) auto; gap: 8px; align-items: center; margin: 0; }
+.account-form label, .account-device-controls label { margin: 0; white-space: nowrap; }
+.account-form input, .account-form button { margin: 0; min-width: 0; }
+.account-form input { padding: 9px 10px; }
+.account-status { grid-column: 2; min-height: 16px; margin: 0; color: #b04d4d; font-size: 12px; }
+.account-status.is-ok { color: #218a6c; }
+.account-recovery-note { grid-column: 2; font-size: 11px; }
+.account-devices { display: grid; gap: 8px; }
+.account-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: #687083; font-size: 12px; }
+.account-toolbar button, .account-device-controls button { width: auto; margin: 0; white-space: nowrap; }
+.account-device-controls { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto auto; gap: 8px; align-items: center; }
+.account-device-controls select { min-width: 0; margin: 0; }
 .browser-pair-card > .hint { grid-column: 1 / -1; margin: 0; }
 .browser-key-setting { margin: 12px 0 0; }
 .browser-key-setting span { font-size: 11px; }
@@ -319,6 +339,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .nav-button { padding: 10px 14px; }
   .browser-pair-card { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-bottom: 14px; padding: 16px; }
   .browser-pair-card > .hint { grid-column: auto; }
+  .account-panel { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .account-form { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .account-form label { margin-top: 4px; }
+  .account-form button { width: 100%; }
+  .account-status, .account-recovery-note { grid-column: 1; }
+  .account-device-controls { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .account-device-controls label { grid-column: 1 / -1; }
+  .account-device-controls select { grid-column: 1 / -1; }
+  .account-device-controls button { width: 100%; }
   .pair-code-controls { min-width: 0; grid-template-columns: minmax(0, 1fr) auto; }
   .pair-code-controls #disconnectPairButton { grid-column: 1 / -1; }
   .pair-code-controls input { min-width: 0; max-width: none; }

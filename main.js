@@ -5,6 +5,7 @@ const {
   desktopCapturer,
   ipcMain,
   Menu,
+  dialog,
   net,
   safeStorage,
   screen,
@@ -19,6 +20,10 @@ const os = require('os');
 const path = require('path');
 const WebSocket = require('ws');
 const { createTrayLifecycle } = require('./tray-lifecycle');
+const { CloudDeviceStore } = require('./cloud-device-store');
+const { cloudRetryDelay } = require('./cloud-reconnect-policy');
+const { cloudStopIsSafeToExit, settleCloudStopQuit, stopCloudDeviceSafely } = require('./cloud-stop-policy');
+const { getCloudAutoStart, setCloudAutoStart } = require('./cloud-auto-start');
 
 let mainWindow;
 let trayLifecycle = null;
@@ -34,7 +39,17 @@ let lanShareCapturePromise = null;
 let cloudPairCredentials = null;
 let cloudPairSocket = null;
 let cloudPairRetryTimer = null;
+let cloudPairStableTimer = null;
 let cloudPairPaired = false;
+let cloudPairRetryAttempt = 0;
+let cloudDeviceStore = null;
+let cloudStopPending = false;
+let cloudStopSafeToExit = true;
+let cloudStopOperationActive = false;
+let cloudStopQuitRequested = false;
+let cloudStopExitPromptOpen = false;
+let allowUnsafeCloudStopExit = false;
+let lastCloudShareStatus = { state: 'stopped', message: '尚未连接公网中继' };
 
 const defaultRelayUrl = 'https://screenbridge.zahml.top';
 
@@ -429,7 +444,10 @@ function getRelayBaseUrl() {
 }
 
 function sendCloudShareStatus(state, message = '') {
-  sendToRenderer('cloud-share-status', { state, message });
+  let info = null;
+  try { info = cloudPairInfo(); } catch {}
+  lastCloudShareStatus = { state, message, info };
+  sendToRenderer('cloud-share-status', lastCloudShareStatus);
 }
 
 function sendCloudConfig() {
@@ -443,13 +461,8 @@ function sendCloudConfig() {
 }
 
 function connectCloudPair() {
-  if (!cloudPairCredentials || cloudPairSocket || cloudPairRetryTimer) return;
+  if (cloudStopPending || !cloudPairCredentials || cloudPairSocket || cloudPairRetryTimer) return;
   const credentials = cloudPairCredentials;
-  if (!cloudPairPaired && credentials.expiresAt <= Date.now()) {
-    cloudPairCredentials = null;
-    sendCloudShareStatus('expired', '配对码已过期，请重新创建');
-    return;
-  }
 
   let relayBase;
   try {
@@ -460,8 +473,9 @@ function connectCloudPair() {
   }
   const websocketUrl = relayBase.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:') + '/ws';
   const socket = new WebSocket(websocketUrl, { handshakeTimeout: 10_000, perMessageDeflate: false });
+  let credentialsRejected = false;
   cloudPairSocket = socket;
-  sendCloudShareStatus('connecting', '正在连接公网中继…');
+  sendCloudShareStatus(cloudPairPaired ? 'reconnecting' : 'connecting', '正在连接公网中继…');
 
   socket.on('open', () => {
     if (cloudPairSocket !== socket || !cloudPairCredentials) return socket.close();
@@ -480,7 +494,15 @@ function connectCloudPair() {
       return;
     }
     if (message.type === 'authenticated') {
-      sendCloudShareStatus('connected', '公网共享已连接，等待查看设备');
+      cloudPairPaired = cloudPairPaired || message.resumed === true;
+      if (cloudPairStableTimer) clearTimeout(cloudPairStableTimer);
+      cloudPairStableTimer = setTimeout(() => {
+        cloudPairStableTimer = null;
+        if (cloudPairSocket === socket && socket.readyState === WebSocket.OPEN) cloudPairRetryAttempt = 0;
+      }, 30_000);
+      cloudPairStableTimer.unref?.();
+      if (cloudPairPaired) sendCloudConfig();
+      sendCloudShareStatus(cloudPairPaired ? 'paired' : 'connected', cloudPairPaired ? '设备已恢复连接，配对码保持不变' : '公网共享已连接，等待网页首次绑定');
     } else if (message.type === 'frame-request') {
       try {
         const frame = await captureLanFrame();
@@ -491,15 +513,26 @@ function connectCloudPair() {
         }
       }
     } else if (message.type === 'error') {
-      sendCloudShareStatus('error', message.message || '公网配对连接失败');
+      if (message.code === 'PAIR_EXPIRED' || message.code === 'DEVICE_REVOKED') {
+        credentialsRejected = true;
+        cloudPairCredentials = null;
+        cloudPairPaired = false;
+        try { cloudDeviceStore?.clear(); } catch {}
+        sendCloudShareStatus(message.code === 'DEVICE_REVOKED' ? 'revoked' : 'expired', message.code === 'DEVICE_REVOKED'
+          ? '设备已撤销或本机凭据无效，请从网页端重新绑定'
+          : '首次绑定配对码已过期，请创建新配对');
+        socket.close();
+      } else {
+        sendCloudShareStatus('reconnecting', message.message || '公网配对连接暂不可用');
+      }
     } else if (message.type === 'source-connected') {
       sendCloudShareStatus('connected', '公网共享已连接，查看设备可以取图');
     } else if (message.type === 'viewer-connected') {
       cloudPairPaired = true;
       sendCloudConfig();
-      sendCloudShareStatus('paired', '查看设备已连接；心跳保活中，直到任一端或网络断开');
+      sendCloudShareStatus('paired', '设备已绑定；网络恢复后会自动重连，配对码保持不变');
     } else if (message.type === 'viewer-disconnected') {
-      sendCloudShareStatus('connected', '查看设备已断开，配对码仍可使用');
+      sendCloudShareStatus('paired', '查看设备已断开，设备绑定仍然有效');
     }
   });
   socket.on('error', (error) => {
@@ -508,37 +541,28 @@ function connectCloudPair() {
   socket.on('close', () => {
     if (cloudPairSocket !== socket) return;
     cloudPairSocket = null;
-    if (!cloudPairCredentials) return;
-    if (cloudPairPaired) {
-      cloudPairCredentials = null;
-      cloudPairPaired = false;
-      sendCloudShareStatus('disconnected', '连接已断开，旧配对码已失效；如需继续请创建新的配对码');
-      return;
-    }
-    if (cloudPairCredentials.expiresAt <= Date.now()) {
-      cloudPairCredentials = null;
-      sendCloudShareStatus('expired', '配对码已过期，请重新创建');
-      return;
-    }
-    sendCloudShareStatus('connecting', '公网连接中断，正在重连…');
+    if (cloudPairStableTimer) clearTimeout(cloudPairStableTimer);
+    cloudPairStableTimer = null;
+    if (!cloudPairCredentials || credentialsRejected || cloudStopPending) return;
+    sendCloudShareStatus('reconnecting', '公网连接中断，正在自动恢复…');
+    const delay = cloudRetryDelay(cloudPairRetryAttempt++);
     cloudPairRetryTimer = setTimeout(() => {
       cloudPairRetryTimer = null;
       connectCloudPair();
-    }, 2500);
+    }, delay);
     cloudPairRetryTimer.unref?.();
   });
 }
 
 async function startCloudShare() {
-  if (cloudPairCredentials && (cloudPairPaired || cloudPairCredentials.expiresAt > Date.now())) {
+  if (cloudStopPending) throw new Error('本机设备凭据停用尚未保存，请重试停止共享。');
+  if (cloudPairCredentials) {
     connectCloudPair();
-    return {
-      code: cloudPairCredentials.code,
-      expiresAt: cloudPairCredentials.expiresAt,
-      viewerUrl: `${getRelayBaseUrl()}/view`
-    };
+    return cloudPairInfo();
   }
 
+  if (!cloudDeviceStore) throw new Error('本机安全存储尚未准备好。');
+  cloudDeviceStore.assertEncryptionAvailable();
   const relayBase = getRelayBaseUrl();
   sendCloudShareStatus('creating', '正在创建配对码…');
   const response = await fetch(`${relayBase}/api/pair`, {
@@ -558,27 +582,120 @@ async function startCloudShare() {
     cloudPairCredentials = null;
     throw new Error('中继返回的配对信息格式无效');
   }
+  try {
+    cloudDeviceStore.save(cloudPairCredentials);
+  } catch (error) {
+    cloudPairCredentials = null;
+    throw error;
+  }
+  cloudPairRetryAttempt = 0;
+  if (cloudPairStableTimer) clearTimeout(cloudPairStableTimer);
+  cloudPairStableTimer = null;
   connectCloudPair();
-  return {
-    code: `${cloudPairCredentials.code.slice(0, 4)}-${cloudPairCredentials.code.slice(4)}`,
-    expiresAt: cloudPairCredentials.expiresAt,
-    viewerUrl: `${relayBase}/view`
-  };
+  return cloudPairInfo();
 }
 
-function stopCloudShare() {
+async function stopCloudShare() {
+  if (cloudStopOperationActive) {
+    return { ok: false, revoked: false, credentialsCleared: false, error: '停止共享操作正在进行。' };
+  }
+  const credentials = cloudPairCredentials;
+  cloudStopPending = true;
+  cloudStopSafeToExit = !credentials;
+  cloudStopOperationActive = true;
   cloudPairCredentials = null;
   cloudPairPaired = false;
+  cloudPairRetryAttempt = 0;
   if (cloudPairRetryTimer) clearTimeout(cloudPairRetryTimer);
   cloudPairRetryTimer = null;
+  if (cloudPairStableTimer) clearTimeout(cloudPairStableTimer);
+  cloudPairStableTimer = null;
   if (cloudPairSocket) {
     const socket = cloudPairSocket;
     cloudPairSocket = null;
-    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'stop' }));
     socket.close();
   }
-  sendCloudShareStatus('stopped', '公网共享已停止，旧配对码已失效');
-  return { ok: true };
+  const result = await stopCloudDeviceSafely(credentials, async (value) => {
+      const relayBase = getRelayBaseUrl();
+      const response = await fetch(`${relayBase}/api/device/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: value.code, secret: value.secret }),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(5000)
+      });
+      return response.ok;
+    }, () => {
+      cloudDeviceStore?.clear();
+      cloudStopSafeToExit = true;
+    });
+  cloudStopOperationActive = false;
+  cloudStopSafeToExit = cloudStopIsSafeToExit({ hadCredentials: Boolean(credentials), ...result });
+  if (!result.credentialsCleared) {
+    cloudPairCredentials = result.revoked ? null : credentials;
+    const message = result.revoked
+      ? '服务器已撤销设备授权，但本机停用标记保存失败。此进程不会重连；请保持运行并重试停止共享。'
+      : '本机停用标记保存失败，服务器也未确认撤销。请保持程序运行并重试；退出前会提示恢复风险。';
+    sendCloudShareStatus('error', message);
+    finishPendingQuitAfterCloudStop();
+    return result;
+  }
+  cloudStopPending = false;
+  sendCloudShareStatus('stopped', result.revoked
+    ? '共享已停止，设备绑定和本机密钥已撤销'
+    : '本机设备凭据已停用；若网页设备列表仍显示该设备，请从网页端撤销');
+  finishPendingQuitAfterCloudStop();
+  return result;
+}
+
+function finishPendingQuitAfterCloudStop() {
+  const quitRequested = cloudStopQuitRequested;
+  cloudStopQuitRequested = false;
+  settleCloudStopQuit(quitRequested, cloudStopSafeToExit, () => app.quit(), showUnsafeCloudStopExitPrompt);
+}
+
+function showUnsafeCloudStopExitPrompt() {
+  if (cloudStopExitPromptOpen) return;
+  cloudStopExitPromptOpen = true;
+  dialog.showMessageBox({
+    type: 'warning',
+    buttons: ['继续运行', '仍然退出'],
+    defaultId: 0,
+    cancelId: 0,
+    title: '公网共享无法安全停用',
+    message: '本机停用标记保存失败，服务器也未确认撤销。',
+    detail: '退出后，屏桥下次启动时可能继续使用已保存的设备凭据。建议继续运行并重试停止共享。'
+  }).then(({ response }) => {
+    cloudStopExitPromptOpen = false;
+    if (response === 1) {
+      allowUnsafeCloudStopExit = true;
+      app.quit();
+    }
+  }).catch(() => {
+    cloudStopExitPromptOpen = false;
+  });
+}
+
+function cloudPairInfo() {
+  if (!cloudPairCredentials) return null;
+  return {
+    code: `${cloudPairCredentials.code.slice(0, 4)}-${cloudPairCredentials.code.slice(4)}`,
+    expiresAt: cloudPairPaired ? null : cloudPairCredentials.expiresAt,
+    viewerUrl: `${getRelayBaseUrl()}/view`,
+    paired: cloudPairPaired
+  };
+}
+
+function pauseCloudPairForShutdown() {
+  if (cloudPairRetryTimer) clearTimeout(cloudPairRetryTimer);
+  cloudPairRetryTimer = null;
+  if (cloudPairStableTimer) clearTimeout(cloudPairStableTimer);
+  cloudPairStableTimer = null;
+  if (cloudPairSocket) {
+    const socket = cloudPairSocket;
+    cloudPairSocket = null;
+    socket.close(1001, '采集程序正在退出');
+  }
 }
 
 function lanShareInfo() {
@@ -979,20 +1096,18 @@ async function streamChatFollowUp(payload, config) {
   await streamCompletion({ config, apiBackend, requestBody, eventName: 'chat' });
 }
 
-function buildPresetQueue(group, requestedPresetId, autoFallback) {
-  const selected = group.presets.find((preset) => preset.id === requestedPresetId)
-    || group.presets.find((preset) => preset.id === group.activePresetId)
-    || group.presets[0];
-  if (!autoFallback) return [selected];
-
-  const fallbackPresets = group.presets
-    .filter((preset) => preset.id !== selected.id && preset.enabled)
-    .sort((left, right) => left.priority - right.priority);
-  return [selected, ...fallbackPresets];
+function buildPresetQueue(group, requestedPresetId) {
+  if (requestedPresetId) {
+    const selected = group.presets.find((preset) => preset.id === requestedPresetId);
+    if (!selected) throw new Error('所选模型已从配置中移除，请重新选择后发送。');
+    return [selected];
+  }
+  const selected = group.presets.find((preset) => preset.id === group.activePresetId) || group.presets[0];
+  return [selected];
 }
 
 async function runWithFallback({ group, autoFallback, requestedPresetId, eventName, run }) {
-  const queue = buildPresetQueue(group, requestedPresetId, autoFallback);
+  const queue = buildPresetQueue(group, requestedPresetId);
   const failures = [];
 
   for (let index = 0; index < queue.length; index += 1) {
@@ -1032,6 +1147,7 @@ function createWindow() {
     minHeight: 650,
     backgroundColor: '#f5f7fb',
     title: '屏桥 ScreenBridge',
+    show: !process.argv.includes('--hidden'),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1044,6 +1160,14 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  cloudDeviceStore = new CloudDeviceStore(app.getPath('userData'), safeStorage);
+  try {
+    cloudPairCredentials = cloudDeviceStore.load();
+    if (cloudPairCredentials) sendCloudShareStatus('reconnecting', '正在恢复已绑定的采集电脑…');
+  } catch (error) {
+    sendCloudShareStatus('error', error.message);
+  }
+
   ipcMain.handle('get-config', () => readConfig());
   ipcMain.handle('save-config', (_event, config) => {
     const saved = writeConfig(config);
@@ -1056,6 +1180,9 @@ app.whenReady().then(() => {
   ipcMain.handle('stop-lan-share', () => stopLanShare());
   ipcMain.handle('start-cloud-share', () => startCloudShare());
   ipcMain.handle('stop-cloud-share', () => stopCloudShare());
+  ipcMain.handle('get-cloud-share-state', () => ({ status: lastCloudShareStatus, info: cloudPairInfo() }));
+  ipcMain.handle('get-cloud-auto-start', () => getCloudAutoStart(app));
+  ipcMain.handle('set-cloud-auto-start', (_event, enabled) => setCloudAutoStart(app, enabled));
   ipcMain.handle('discover-lan-shares', () => discoverLanShares());
   ipcMain.handle('minimize-lan-share', () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
@@ -1122,14 +1249,15 @@ app.whenReady().then(() => {
     Tray,
     Menu,
     getWindow: () => mainWindow,
+    canQuit: () => !cloudStopPending || cloudStopSafeToExit || allowUnsafeCloudStopExit,
     iconPath: path.join(__dirname, 'assets', 'icon.ico')
   });
   createWindow();
+  if (cloudPairCredentials) connectCloudPair();
 });
 
 app.on('window-all-closed', () => {
   stopLanShare().catch(() => {});
-  stopCloudShare();
   if (process.platform !== 'darwin' && !isQuitting) app.quit();
 });
 
@@ -1138,6 +1266,17 @@ app.on('activate', () => {
   else trayLifecycle?.showWindow();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (cloudStopPending && !cloudStopSafeToExit && !allowUnsafeCloudStopExit) {
+    event.preventDefault();
+    if (cloudStopOperationActive) {
+      cloudStopQuitRequested = true;
+    } else {
+      showUnsafeCloudStopExitPrompt();
+    }
+    return;
+  }
   isQuitting = true;
+  stopLanShare().catch(() => {});
+  pauseCloudPairForShutdown();
 });

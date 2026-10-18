@@ -95,3 +95,67 @@
 | 公网 WSS 配置转发 | 创建一次性配对，认证采集端、加入查看端并发送测试配置 | pass；系统提示词、预设文字及测试用 API Key 字段抵达对应查看端 |
 
 线上部署和 Windows 安装包构建已完成。真实 Windows 安装及真实模型请求仍未执行，属于可选手动验收。
+
+## iteration 6：答案选区预览、截图栏清理与追问修复
+
+| 检查项 | 证据 | 结果 |
+| --- | --- | --- |
+| Responses API 历史消息 | `node --test server/test/viewer.test.js`；请求包含用户文本、助手回答及用户追问，并附带一张截图 | pass；用户消息为 `input_text`，助手回答为 `output_text`，附图为 `input_image`；请求发送到 `/responses` |
+| HTTP 400 诊断 | 同一测试文件模拟模型服务 HTTP 400 | pass；状态码、状态文字及响应正文继续显示 |
+| 本机语法与全量测试 | `npm.cmd run check`；`npm.cmd test` | pass；语法检查通过，17/17 测试通过 |
+| 差异格式 | `git diff --check` | pass；无空白错误（Git 仅提示工作区 LF 文件可能转换为 CRLF） |
+| OpenSpec 校验器 | 检查 `node_modules/.bin/openspec.cmd` 与 PATH 中的 `openspec` | unavailable；仓库未安装 CLI，保留变更文档，未运行归档命令 |
+| 公网更新 | `/opt/screenbridge/server/backups/web-workbench-20261011-1535/predeploy.tar.gz`（已验证可读并包含四个目标文件）；部署后检查 `/`、`/view`、`/viewer.css`、`/viewer.js`、`/workbench.js`、`/healthz` 及公网资源 SHA-256 | pass；全部 HTTP 200，四个文件哈希与本机一致，`screenbridge-relay.service` 为 active |
+| 人工浏览器验收 | 平板/桌面选区放大与实际模型连续追问 | optional；本轮尚未执行 |
+
+## iteration 7：网页配对会话恢复
+
+| 检查项 | 证据 | 结果 |
+| --- | --- | --- |
+| 恢复凭据签发和保存 | `server/relay.js` 首次加入返回 32 字节随机令牌，中继房间保存 SHA-256 哈希；网页通过同浏览器 `localStorage` 持有凭据 | pass；凭据不放 URL，用户手动断开会清除本地值并结束房间 |
+| 中继恢复与断连边界 | `node --test server/test/relay.test.js` | pass；13/13；断线后房间保留、短配对码被拒、错误令牌不影响当前端、同令牌可替换旧查看连接并继续取图、采集端停止后令牌失效 |
+| 网页重载和网络重试 | `node --test server/test/viewer.test.js` | pass；5/5；刷新页自动发起恢复认证、网络断开按退避重试、旧标签页不会抢回连接、手动断开清除凭据 |
+| 全量语法和回归 | `npm.cmd run check`；`npm.cmd test`；`git diff --check` | pass；语法通过，23/23 测试通过，差异检查通过 |
+| 初次独立只读审查 | 审查认证、会话替换、恢复令牌失效路径 | failed；发现替换 socket 的迟到消息可影响新会话，以及限流错误可能清除有效令牌 |
+| 审查问题修复 | relay 与网页 socket 回调校验当前连接；仅明确失效错误清理凭据；新增迟到消息回归测试 | pass；独立只读复审确认无阻止部署的认证/会话问题；记录旧截图 FileReader 异步边界为非阻断项 |
+| 部署前连通性 | SSH 公钥只读连接；`systemctl is-active screenbridge-relay.service`；`https://screenbridge.zahml.top/healthz` | pass；SSH 可用、服务 active、HTTPS 返回 200；使用服务专属 Node `/opt/screenbridge/node/bin/node` |
+| 部署前哈希 | 本地 `Get-FileHash` 与线上 `sha256sum` | pass；已记录三文件线上旧哈希，均与待部署本地文件不同 |
+| 独立部署范围评审 | 三文件精确更新、专属服务重启、内存配对失效说明和回滚步骤 | pass；沿用已完成的只读独立评审，未扩展至 Nginx、Docker、其它站点或 systemd unit |
+| 三文件专属备份 | `/opt/screenbridge/server/backups/web-pair-recovery-20261012-1/predeploy.tar.gz`；`tar -tzf` 和逐文件内容哈希 | pass；仅含 `relay.js`、`public/index.html`、`public/viewer.js`；归档 SHA-256 为 `37ad8e97d26e8378dcdfff7f6788b25ff008290fcd72911bd95ab7fa537f3d8b`，内部文件哈希与部署前线上一致 |
+| 上传暂存校验 | SCP 上传到专属备份目录 `incoming/`；服务器 `sha256sum` 和 `/opt/screenbridge/node/bin/node --check` | pass；三个文件与本机一致，暂存 `relay.js` 语法检查通过 |
+| 首次部署与精确回滚 | 二次语法检查使用 `.deploy` 后缀，Node 22 返回 `ERR_UNKNOWN_FILE_EXTENSION`；ERR trap 恢复三文件备份并启动专属服务 | 回滚通过；三个旧哈希恢复，服务 active，服务器 `/healthz` 返回 200；尚未替换正式文件就触发回滚，随后改用 `.js` 临时文件名 |
+| 正式替换和就绪探测 | 使用 `.js` 临时文件校验后原位替换；重启 `screenbridge-relay.service` 并有界等待本机 `/healthz` | pass；服务 active，健康返回 200，三个正式文件哈希与工作区一致；临时文件已清理 |
+| 公网 HTTP 验证 | HTTPS `/`、`/view`、`/viewer.js`、`/viewer.css`、`/workbench.js`、`/healthz`；页面和新脚本逐字节 SHA-256 | pass；全部 200；首页和 `/view` SHA-256 为 `f6f47037493babffdcf89feb11da7a8638e2d37d348c83968824951891627697`，`viewer.js` 为 `9db5591aa8803707f5ba2101ade6162cc336693daf5610727d9713d5975b3921`；中继 SHA-256 为 `f9f7c105e879cac73c4c95f78c5b30a3f5fce76bceb53e89b6b42b1ae2983e46` |
+| 公网 WSS 配对与恢复 | 本机 Node 经 HTTPS 创建临时配对；经 WSS 认证采集端、首次加入、关闭查看连接后以恢复凭据续接 | pass；首次配对成功，查看端断开时采集连接保持 OPEN，恢复握手返回 `resumed: true`；恢复凭据与配对密钥未输出 |
+| 恢复后的配置与取图 | 同一临时采集连接发送无密钥测试配置；恢复后的查看端请求并接收二进制测试帧 | pass；配置经 `source-config` 转发，画面元数据字节数与测试帧一致，二进制内容往返一致；为协议冒烟检查，未采集用户真实屏幕 |
+| 主动断开与测试清理 | 恢复查看端发送 `disconnect`，观察双方关闭并再次尝试恢复旧令牌 | pass；双方连接关闭、旧令牌被拒，全部临时 WebSocket 已关闭 |
+| 部署后最终状态 | `systemctl is-active`、服务器 `/healthz`、三个正式文件的 `sha256sum` | pass；服务 active、健康正常，三个部署哈希保持与本机一致；未提交或推送工作区 |
+| 实际浏览器与 Windows 手验 | 实际网页刷新与采集端长连接 | optional；本轮未执行，既有自动化组件不可用；自动化网页生命周期测试和公网 WSS 协议验证已通过 |
+
+- `recovery_violation`：恢复摘要未包含 WSS 冒烟脚本和协议消息细节，补充读取了当前任务涉及的中继协议、测试辅助函数和运行时配置；读取限定在本次部署范围，没有重跑已通过且代码未变的本机测试。
+
+## iteration 8：对话时手动选择模型
+
+| 检查项 | 证据 | 结果 |
+| --- | --- | --- |
+| 请求使用指定模型 | `server/test/viewer.test.js` 覆盖追问指定 `chat-fast`、保留历史消息、请求失败不顺延及已删除 ID 不落到默认模型；网页 Chrome 模拟覆盖截图分析和追问发送所选预设 ID | pass；单次请求仅调用一个模型，选中项失效时提示重新选择 |
+| 配置同步与选择状态 | 本机 Chrome 模拟模型 API，更新采集端配置后检查仍存在的选择 | pass；网页保留有效选择；被删选择由代码路径回到当前默认项 |
+| 交互与响应式 | 检查生成期间的禁用状态、停止后的状态恢复；Chrome 390px 视口 | pass；生成时不能切换，停止后恢复；无横向溢出且选择框留在视口内。真实平板及 Windows Electron 未手验 |
+| 截图/对话上下文自审 | 对比网页 `workbench.js` 的截图来源、附图条件及追问历史构造差异 | pass；选模改动只传所选 `presetId`，未改写本轮截图保留、可选附图和既有对话历史行为 |
+| 全量本机验证 | `npm.cmd run check`；`npm.cmd test`；`git diff --check` | pass；语法检查通过，26/26 测试通过，差异检查通过 |
+| 发布状态 | 网页部署、Windows 安装包构建及真实供应商请求 | pass；网页部署及安装包构建见下方发布记录；真实供应商模型请求未执行 |
+
+自审结论：iteration 8 本机实现与验证通过。实际平板、Windows Electron 和真实供应商模型验收未执行。
+
+## iteration 8 发布与打包（2026-10-16）
+
+| 检查项 | 证据 | 结果 |
+| --- | --- | --- |
+| 版本号 | `package.json`、`package-lock.json` 与 `app.asar/package.json` | pass；均为 0.4.3 |
+| Windows 安装包构建 | `npm.cmd run dist -- --config.directories.output=dist/release-0.4.3 --publish never` | pass；退出码 0，生成 x64 安装程序（84,192,957 字节）和 ZIP（117,622,589 字节） |
+| 安装包内容及旧产物保护 | 从 `dist/release-0.4.3/win-unpacked/resources/app.asar` 读取版本和渲染脚本；检查 ZIP 条目及 `dist/` 根目录 0.4.2 文件 | pass；归档含模型选择器与所选预设请求字段；新产物隔离保存，0.4.2 安装程序与 ZIP 保持原时间戳和大小 |
+| 数字签名 | `Get-AuthenticodeSignature` 检查 0.4.3 安装程序 | not signed；Windows 可能显示 SmartScreen 提示 |
+| 发布前只读审查 | 独立上下文检查选模、配对恢复协议兼容、静态部署范围和 0.4.3 输出目录 | pass；无剩余 P0/P1/P2；线上 `relay.js` 与本地 SHA-256 相同（`f9f7c105e879cac73c4c95f78c5b30a3f5fce76bceb53e89b6b42b1ae2983e46`），无需部署中继 |
+| 发布前公网状态 | SSH 只读检查专属服务状态及公网 HTTPS 首页、`/healthz` | pass；服务 active，页面及健康检查均 HTTP 200 |
+| 网页静态资源更新 | `/opt/screenbridge/server/backups/model-choice-20261016-1/predeploy.tar.gz`（SHA-256 `4ee5d186541b8298fb9188aa139a2e0ff4362fe42af900475d4a0758de7455e3`）；线上及公网 SHA-256 对照；HTTPS 路径检查；专属服务状态 | pass；备份仅含四个目标文件且可读；`index.html`、`viewer.css`、`viewer.js`、`workbench.js` 的线上与公网字节均和本机一致；`/`、`/view`、四个静态资源、`/healthz` 全部 HTTP 200；`screenbridge-relay.service` active，未重启中继 |
+| 实际浏览器配对验收 | 公网浏览器连接采集端并切换模型 | optional；本轮未执行；真实平板、Windows Electron 和真实模型请求也未执行 |

@@ -13,6 +13,7 @@ const elements = {
   previewWrap: document.getElementById('previewWrap'),
   screenshotGallery: document.getElementById('screenshotGallery'),
   promptInput: document.getElementById('promptInput'),
+  visionModelSelect: document.getElementById('visionModelSelect'),
   visionPromptPresetSelect: document.getElementById('visionPromptPresetSelect'),
   visionPromptPresetAddButton: document.getElementById('visionPromptPresetAddButton'),
   visionPromptPresetUpdateButton: document.getElementById('visionPromptPresetUpdateButton'),
@@ -23,6 +24,7 @@ const elements = {
   thread: document.getElementById('thread'),
   threadEmpty: document.getElementById('threadEmpty'),
   chatInput: document.getElementById('chatInput'),
+  chatModelSelect: document.getElementById('chatModelSelect'),
   chatPromptPresetSelect: document.getElementById('chatPromptPresetSelect'),
   chatPromptPresetAddButton: document.getElementById('chatPromptPresetAddButton'),
   chatPromptPresetUpdateButton: document.getElementById('chatPromptPresetUpdateButton'),
@@ -47,9 +49,6 @@ const elements = {
   stPresetNameInput: document.getElementById('stPresetNameInput'),
   stPrimaryPresetInput: document.getElementById('stPrimaryPresetInput'),
   stPrimaryPresetLabel: document.getElementById('stPrimaryPresetLabel'),
-  stPriorityInput: document.getElementById('stPriorityInput'),
-  stPresetEnabledInput: document.getElementById('stPresetEnabledInput'),
-  stAutoFallbackInput: document.getElementById('stAutoFallbackInput'),
   stBaseUrlInput: document.getElementById('stBaseUrlInput'),
   stApiBackendInput: document.getElementById('stApiBackendInput'),
   stModelInput: document.getElementById('stModelInput'),
@@ -65,6 +64,7 @@ const elements = {
   stopCloudShareButton: document.getElementById('stopCloudShareButton'),
   cloudPairStatus: document.getElementById('cloudPairStatus'),
   cloudShareInfo: document.getElementById('cloudShareInfo'),
+  cloudAutoStartInput: document.getElementById('cloudAutoStartInput'),
   minimizeShareButton: document.getElementById('minimizeShareButton'),
   lanStatus: document.getElementById('lanStatus'),
   shareInfo: document.getElementById('shareInfo'),
@@ -106,6 +106,7 @@ let settingsConfig = null;
 let settingsGroup = 'vision';
 let editingPresetId = '';
 const selectedPromptPresetIds = { vision: '', chat: '' };
+const selectedModelPresetIds = { vision: '', chat: '' };
 let pendingPromptPresetGroup = '';
 let promptPresetSaving = false;
 let discoveredDevices = [];
@@ -351,10 +352,53 @@ function updateComposerState() {
   elements.chatInput.disabled = !ready;
   elements.sendChatButton.disabled = !ready;
   elements.attachImageInput.disabled = !ready || currentScreenshots.length === 0;
+  updateModelSelectorState();
   if (!isGenerating) {
     elements.chatHint.textContent = hasAnswer()
       ? '追问由“对话模型”处理，会带上本轮对话上下文。'
       : '完成一次截图分析后即可开始追问，追问由“对话模型”处理。';
+  }
+}
+
+function modelSelectorElements(group) {
+  return group === 'vision' ? elements.visionModelSelect : elements.chatModelSelect;
+}
+
+function selectedModelPreset(group) {
+  const data = appConfig && appConfig[group];
+  if (!data || !Array.isArray(data.presets) || !data.presets.length) return null;
+  const selected = selectedModelPresetIds[group];
+  if (selected) return data.presets.find((preset) => preset.id === selected) || null;
+  return data.presets.find((preset) => preset.id === data.activePresetId) || data.presets[0];
+}
+
+function renderModelSelector(group) {
+  const select = modelSelectorElements(group);
+  if (!select || !appConfig || !appConfig[group]) return;
+  const data = appConfig[group];
+  if (!data.presets.some((preset) => preset.id === selectedModelPresetIds[group])) {
+    selectedModelPresetIds[group] = '';
+  }
+  const selected = selectedModelPreset(group);
+  const selectedId = selected ? selected.id : '';
+  select.innerHTML = data.presets.map((preset) => {
+    const detail = preset.model ? ` · ${preset.model}` : ' · 未配置模型';
+    const disabled = !preset.baseUrl || !preset.model ? ' disabled' : '';
+    return `<option value="${escapeHtml(preset.id)}"${disabled}>${escapeHtml(preset.name || preset.id)}${escapeHtml(detail)}</option>`;
+  }).join('');
+  select.value = selectedId;
+  select.disabled = isGenerating;
+}
+
+function renderModelSelectors() {
+  renderModelSelector('vision');
+  renderModelSelector('chat');
+}
+
+function updateModelSelectorState() {
+  for (const group of ['vision', 'chat']) {
+    const select = modelSelectorElements(group);
+    if (select) select.disabled = isGenerating || !appConfig;
   }
 }
 
@@ -436,15 +480,15 @@ function cloneConfig(config) {
 }
 
 function updateModelChips() {
-  const describe = (group, label) => {
-    const preset = group.presets.find((item) => item.id === group.activePresetId) || group.presets[0];
+  const describe = (kind, label) => {
+    const preset = selectedModelPreset(kind);
     if (!preset || !preset.model) return `${label}：未配置`;
     return `${label}：${preset.name} · ${preset.model}`;
   };
-  elements.visionChip.textContent = describe(appConfig.vision, '视觉');
-  elements.chatChip.textContent = describe(appConfig.chat, '对话');
-  elements.visionChip.classList.toggle('is-missing', !appConfig.vision.presets.some((item) => item.id === appConfig.vision.activePresetId && item.model));
-  elements.chatChip.classList.toggle('is-missing', !appConfig.chat.presets.some((item) => item.id === appConfig.chat.activePresetId && item.model));
+  elements.visionChip.textContent = describe('vision', '视觉');
+  elements.chatChip.textContent = describe('chat', '对话');
+  elements.visionChip.classList.toggle('is-missing', !selectedModelPreset('vision')?.model);
+  elements.chatChip.classList.toggle('is-missing', !selectedModelPreset('chat')?.model);
 }
 
 function loadConfig(config) {
@@ -455,6 +499,7 @@ function loadConfig(config) {
     }
     renderPromptPresetToolbar(group);
   }
+  renderModelSelectors();
   updateModelChips();
   updateComposerState();
 }
@@ -603,11 +648,8 @@ function editingPreset() {
 function commitPresetForm() {
   const preset = editingPreset();
   if (!preset) return;
-  const priority = Number.parseInt(elements.stPriorityInput.value, 10);
   Object.assign(preset, {
     name: elements.stPresetNameInput.value.trim() || '未命名预设',
-    priority: Number.isFinite(priority) && priority > 0 ? priority : 1,
-    enabled: elements.stPresetEnabledInput.checked,
     baseUrl: elements.stBaseUrlInput.value.trim(),
     apiBackend: elements.stApiBackendInput.value,
     model: elements.stModelInput.value.trim(),
@@ -619,7 +661,7 @@ function commitPresetForm() {
 function renderPresetOptions() {
   const group = settingsGroupData();
   elements.stPresetSelect.innerHTML = group.presets
-    .map((preset) => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)} · P${preset.priority}</option>`)
+    .map((preset) => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)} · ${escapeHtml(preset.model || '未配置模型')}</option>`)
     .join('');
   elements.stPresetSelect.value = editingPresetId || group.activePresetId;
   elements.stDeletePresetButton.disabled = group.presets.length <= 1;
@@ -632,8 +674,6 @@ function renderPresetForm(presetId) {
   elements.stPresetSelect.value = preset.id;
   elements.stPresetNameInput.value = preset.name || '';
   elements.stPrimaryPresetInput.checked = group.activePresetId === preset.id;
-  elements.stPriorityInput.value = preset.priority || 1;
-  elements.stPresetEnabledInput.checked = preset.enabled !== false;
   elements.stBaseUrlInput.value = preset.baseUrl || '';
   elements.stApiBackendInput.value = preset.apiBackend || 'responses';
   elements.stModelInput.value = preset.model || '';
@@ -650,7 +690,6 @@ function renderSettings() {
   elements.stPrimaryPresetLabel.textContent = `设为${isVision ? '视觉' : '对话'}模型主用预设`;
   elements.stVisionPromptField.hidden = !isVision;
   elements.stChatPromptField.hidden = isVision;
-  elements.stAutoFallbackInput.checked = settingsConfig.autoFallback !== false;
   elements.stSystemPromptInput.value = settingsConfig.systemPrompt || '';
   elements.stChatSystemPromptInput.value = settingsConfig.chatSystemPrompt || '';
 
@@ -685,7 +724,6 @@ function addPreset() {
   commitPresetForm();
   const group = settingsGroupData();
   const current = editingPreset();
-  const nextPriority = Math.max(...group.presets.map((preset) => preset.priority || 0)) + 1;
   const preset = {
     id: createPresetId(),
     name: `${groupLabels[settingsGroup].name} ${group.presets.length + 1}`,
@@ -695,7 +733,7 @@ function addPreset() {
     apiKey: current ? current.apiKey : '',
     proxyUrl: current ? current.proxyUrl : '',
     enabled: true,
-    priority: nextPriority
+    priority: group.presets.length + 1
   };
   group.presets.push(preset);
   renderPresetOptions();
@@ -719,7 +757,6 @@ function deletePreset() {
 async function saveSettings() {
   if (!settingsConfig) return;
   commitPresetForm();
-  settingsConfig.autoFallback = elements.stAutoFallbackInput.checked;
   settingsConfig.systemPrompt = elements.stSystemPromptInput.value.trim();
   settingsConfig.chatSystemPrompt = elements.stChatSystemPromptInput.value.trim();
 
@@ -1043,6 +1080,10 @@ async function analyzeScreenshots(screenshots = currentScreenshots) {
       || screenshots.some((screenshot) => typeof screenshot !== 'string' || !screenshot.startsWith('data:image/'))) {
     throw new Error('没有有效截图，请重新添加后重试');
   }
+  const selectedPreset = selectedModelPreset('vision');
+  if (!selectedPreset || !selectedPreset.baseUrl || !selectedPreset.model) {
+    throw new Error('请选择已配置 API 地址和模型名称的视觉模型');
+  }
   const prompt = elements.promptInput.value.trim() || '请分析这些截图并给出回答。';
   const imageDataUrls = await Promise.all(screenshots.map(compressImage));
 
@@ -1062,7 +1103,7 @@ async function analyzeScreenshots(screenshots = currentScreenshots) {
   await api.analyzeImage({
     imageDataUrls,
     prompt,
-    presetId: appConfig.vision.activePresetId
+    presetId: selectedPreset.id
   });
 }
 
@@ -1070,9 +1111,8 @@ async function startCloudShare() {
   elements.startCloudShareButton.disabled = true;
   try {
     currentCloudPairInfo = await api.startCloudShare();
-    elements.cloudShareInfo.textContent =
-      `查看页面：${currentCloudPairInfo.viewerUrl}\n配对码：${currentCloudPairInfo.code}\n首次连接截止：${new Date(currentCloudPairInfo.expiresAt).toLocaleString()}`;
-    elements.copyCloudCodeButton.disabled = false;
+    elements.cloudShareInfo.textContent = cloudPairInfoText(currentCloudPairInfo);
+    elements.copyCloudCodeButton.disabled = Boolean(currentCloudPairInfo.paired);
     elements.stopCloudShareButton.disabled = false;
     elements.cloudPairStatus.textContent = '配对码已生成，正在连接…';
   } catch (error) {
@@ -1083,12 +1123,30 @@ async function startCloudShare() {
 }
 
 async function stopCloudShare() {
-  await api.stopCloudShare();
+  const result = await api.stopCloudShare();
+  if (!result.credentialsCleared) {
+    elements.cloudShareInfo.textContent = '本机停用状态未保存。请重试停止共享，并在成功前不要关闭屏桥；否则下次启动可能自动恢复。';
+    elements.startCloudShareButton.disabled = true;
+    elements.copyCloudCodeButton.disabled = true;
+    elements.stopCloudShareButton.disabled = false;
+    return;
+  }
   currentCloudPairInfo = null;
-  elements.cloudShareInfo.textContent = '点击“创建配对码”，再在查看设备的浏览器中打开页面并输入配对码。';
+  elements.cloudShareInfo.textContent = result.revoked
+    ? '设备已解绑。下次启动共享会生成新的设备码。'
+    : '本机已保存停用状态；若网页设备列表仍显示该设备，请从网页端撤销。';
   elements.startCloudShareButton.disabled = false;
   elements.copyCloudCodeButton.disabled = true;
   elements.stopCloudShareButton.disabled = true;
+}
+
+function cloudPairInfoText(info) {
+  if (!info) return '点击“创建配对码”，首次在网页端登录账号并绑定设备。';
+  const lines = [`查看页面：${info.viewerUrl}`, `设备码：${info.code}`];
+  if (info.paired) lines.push('已绑定，断线或重启后会使用相同设备码自动恢复');
+  else if (info.expiresAt > Date.now()) lines.push(`首次绑定截止：${new Date(info.expiresAt).toLocaleString()}`);
+  else lines.push('已绑定，断线或重启后会使用相同设备码自动恢复');
+  return lines.join('\n');
 }
 
 async function copyCloudPairInfo() {
@@ -1099,8 +1157,12 @@ async function copyCloudPairInfo() {
 
 api.onCloudShareStatus((status) => {
   if (!status || !elements.cloudPairStatus) return;
+  if (status.info) {
+    currentCloudPairInfo = status.info;
+    elements.cloudShareInfo.textContent = cloudPairInfoText(currentCloudPairInfo);
+  }
   elements.cloudPairStatus.textContent = status.message || status.state;
-  elements.cloudPairStatus.classList.toggle('is-error', status.state === 'error' || status.state === 'expired' || status.state === 'disconnected');
+  elements.cloudPairStatus.classList.toggle('is-error', ['error', 'expired', 'revoked'].includes(status.state));
   if (status.state === 'expired') {
     currentCloudPairInfo = null;
     elements.cloudShareInfo.textContent = '配对码已失效。点击“创建配对码”开始新的共享。';
@@ -1108,13 +1170,16 @@ api.onCloudShareStatus((status) => {
     elements.copyCloudCodeButton.disabled = true;
     elements.stopCloudShareButton.disabled = true;
   } else if (status.state === 'paired') {
-    if (currentCloudPairInfo) {
-      elements.cloudShareInfo.textContent = `查看页面：${currentCloudPairInfo.viewerUrl}\n首次配对已完成，心跳保活中；浏览器/采集端或网络断开后旧码失效。`;
-    }
+    if (currentCloudPairInfo) elements.cloudShareInfo.textContent = cloudPairInfoText(currentCloudPairInfo);
     elements.copyCloudCodeButton.disabled = true;
-  } else if (status.state === 'disconnected') {
+    elements.startCloudShareButton.disabled = true;
+    elements.stopCloudShareButton.disabled = false;
+  } else if (['reconnecting', 'connecting', 'connected'].includes(status.state)) {
+    elements.startCloudShareButton.disabled = true;
+    elements.stopCloudShareButton.disabled = false;
+  } else if (status.state === 'revoked' || status.state === 'disconnected') {
     currentCloudPairInfo = null;
-    elements.cloudShareInfo.textContent = '连接已结束，旧配对码已失效。点击“创建配对码”开始新的共享。';
+    elements.cloudShareInfo.textContent = '设备已撤销或本机凭据无效。请从网页端确认设备状态，再重新绑定。';
     elements.startCloudShareButton.disabled = false;
     elements.copyCloudCodeButton.disabled = true;
     elements.stopCloudShareButton.disabled = true;
@@ -1125,6 +1190,36 @@ api.onCloudShareStatus((status) => {
     elements.stopCloudShareButton.disabled = true;
   }
 });
+
+async function initializeCloudShareControls() {
+  try {
+    const [state, autoStart] = await Promise.all([api.getCloudShareState(), api.getCloudAutoStart()]);
+    if (state.info) {
+      currentCloudPairInfo = state.info;
+      elements.cloudShareInfo.textContent = cloudPairInfoText(state.info);
+      elements.startCloudShareButton.disabled = true;
+      elements.stopCloudShareButton.disabled = false;
+      elements.copyCloudCodeButton.disabled = Boolean(state.info.paired);
+    }
+    if (state.status) {
+      elements.cloudPairStatus.textContent = state.status.message || state.status.state;
+      elements.cloudPairStatus.classList.toggle('is-error', ['error', 'expired', 'revoked'].includes(state.status.state));
+    }
+    elements.cloudAutoStartInput.checked = Boolean(autoStart.enabled);
+    elements.cloudAutoStartInput.disabled = !autoStart.supported;
+  } catch {}
+}
+
+elements.cloudAutoStartInput?.addEventListener('change', async () => {
+  try {
+    elements.cloudAutoStartInput.checked = await api.setCloudAutoStart(elements.cloudAutoStartInput.checked);
+  } catch (error) {
+    elements.cloudPairStatus.textContent = error.message || '无法设置登录启动';
+    elements.cloudAutoStartInput.checked = false;
+  }
+});
+
+initializeCloudShareControls();
 
 async function captureScreenshot() {
   if (isGenerating) return;
@@ -1167,6 +1262,11 @@ async function retryScreenshotBatch() {
 async function sendFollowUp() {
   const text = elements.chatInput.value.trim();
   if (!text || isGenerating || !appConfig) return;
+  const selectedPreset = selectedModelPreset('chat');
+  if (!selectedPreset || !selectedPreset.baseUrl || !selectedPreset.model) {
+    setCaptureStatus('请选择已配置 API 地址和模型名称的对话模型', true);
+    return;
+  }
   if (!hasAnswer()) {
     setCaptureStatus('请先完成一次截图分析', true);
     return;
@@ -1191,11 +1291,13 @@ async function sendFollowUp() {
   elements.chatHint.textContent = '正在生成回答…';
   scrollThreadToBottom();
 
-  const attachImages = elements.attachImageInput.checked && currentScreenshots.length > 0;
+  const screenshotsToAttach = currentScreenshots.length ? currentScreenshots : lastAnalyzedScreenshots;
+  const attachImages = elements.attachImageInput.checked && screenshotsToAttach.length > 0;
+  const imageDataUrls = attachImages ? await Promise.all(screenshotsToAttach.map(compressImage)) : [];
   await api.chatFollowUp({
     history,
-    imageDataUrls: attachImages ? await Promise.all(currentScreenshots.map(compressImage)) : [],
-    presetId: appConfig.chat.activePresetId
+    imageDataUrls,
+    presetId: selectedPreset.id
   });
 }
 
@@ -1246,6 +1348,14 @@ elements.stopButton.addEventListener('click', async () => {
   await api.stopAnalysis();
 });
 elements.sendChatButton.addEventListener('click', sendFollowUp);
+elements.visionModelSelect.addEventListener('change', (event) => {
+  selectedModelPresetIds.vision = event.target.value;
+  updateModelChips();
+});
+elements.chatModelSelect.addEventListener('change', (event) => {
+  selectedModelPresetIds.chat = event.target.value;
+  updateModelChips();
+});
 elements.chatInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();

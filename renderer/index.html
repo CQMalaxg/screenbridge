@@ -76,6 +76,12 @@
             </div>
             <div class="prompt-preset-status" id="visionPromptPresetStatus" aria-live="polite"></div>
             <textarea id="promptInput" rows="5">请阅读这些截图中的题目，先给出结论，再给出简洁、可直接使用的回答。若是编程题，请说明思路、复杂度和关键代码。</textarea>
+            <label class="model-choice" for="visionModelSelect">
+              本次分析使用
+              <select id="visionModelSelect" aria-label="本次分析使用的视觉模型">
+                <option value="">选择视觉模型</option>
+              </select>
+            </label>
             <div class="hint">建议只截取题目相关区域，图片越小，响应通常越快。</div>
           </section>
         </div>
@@ -113,6 +119,12 @@
                 placeholder="针对上面的回答继续追问…（Ctrl + Enter 发送）"
                 disabled
               ></textarea>
+              <label class="model-choice" for="chatModelSelect">
+                本次追问使用
+                <select id="chatModelSelect" aria-label="本次追问使用的对话模型">
+                  <option value="">选择对话模型</option>
+                </select>
+              </label>
               <div class="composer-row">
                 <label class="check-field composer-check">
                   <input id="attachImageInput" type="checkbox" />
@@ -136,14 +148,18 @@
             </div>
             <span class="muted" id="cloudPairStatus">未共享</span>
           </div>
-          <p class="hint">给另一台电脑或平板浏览器使用。采集电脑主动连接服务器，配对后按需传送截图，不要求两台设备在同一局域网。</p>
+          <p class="hint">首次绑定后，设备码保持不变。网络中断、程序重启或中继重启后会自动恢复；电脑关机或休眠时无法采集。</p>
           <div class="lan-actions">
             <button class="secondary-button" id="startCloudShareButton">创建配对码</button>
             <button class="ghost-button" id="copyCloudCodeButton" disabled>复制配对信息</button>
             <button class="ghost-button" id="stopCloudShareButton" disabled>停止共享</button>
           </div>
           <div class="share-info" id="cloudShareInfo">点击“创建配对码”，再在查看设备的浏览器中打开页面并输入配对码。</div>
-          <div class="hint">配对码需在 15 分钟内完成首次连接；连接成功后不会定时断开。关闭浏览器/采集端或网络中断后旧码失效，每组配对只允许一个查看设备。</div>
+          <label class="check-field cloud-autostart-field">
+            <input id="cloudAutoStartInput" type="checkbox" />
+            <span>登录 Windows 后自动启动并恢复公网连接</span>
+          </label>
+          <div class="hint">首次绑定码 15 分钟内有效；绑定后只作为设备标识，网页登录同一账号即可连接。</div>
         </section>
 
         <section class="card lan-card">
@@ -218,16 +234,6 @@
             预设名称
             <input id="stPresetNameInput" type="text" placeholder="例如 主力模型" />
           </label>
-          <div class="settings-row">
-            <label>
-              请求优先级
-              <input id="stPriorityInput" type="number" min="1" max="999" step="1" />
-            </label>
-            <label class="check-field">
-              <input id="stPresetEnabledInput" type="checkbox" />
-              <span>参与自动切换</span>
-            </label>
-          </div>
           <label>
             API 地址
             <input id="stBaseUrlInput" type="url" placeholder="https://api.example.com/v1" />
@@ -266,11 +272,7 @@
             <div class="hint">追问时，截图与上一轮回答会作为上下文一起发送。</div>
           </div>
 
-          <label class="check-field auto-fallback-field">
-            <input id="stAutoFallbackInput" type="checkbox" />
-            <span>请求失败时按优先级自动尝试同组其他已启用预设</span>
-          </label>
-          <div class="security-note">API Key 随各预设保存在本机。截图默认只在内存中处理，不写入本地文件。</div>
+          <div class="security-note">可以保存多个模型，并在每次分析或追问前选择本次使用的模型；当前请求只调用所选模型，不按优先级自动顺延。API Key 随各预设保存在本机。截图默认只在内存中处理，不写入本地文件。</div>
         </div>
 
         <div class="modal-foot">

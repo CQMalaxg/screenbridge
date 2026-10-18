@@ -2,16 +2,31 @@
 
 const assert = require('node:assert/strict');
 const { afterEach, test } = require('node:test');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const WebSocket = require('ws');
 const { createRelayServer } = require('../relay');
 
 const relays = new Set();
+const relayDirectories = new Map();
+let viewerHeaders = {};
 
 async function startRelay(options = {}) {
-  const relay = createRelayServer({ frameMinIntervalMs: 0, sweepIntervalMs: 1000, ...options });
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'screenbridge-relay-test-'));
+  const relay = createRelayServer({ frameMinIntervalMs: 0, sweepIntervalMs: 1000, stateDirectory, ...options });
   const address = await relay.listen(0, '127.0.0.1');
   relays.add(relay);
-  return { relay, baseUrl: `http://127.0.0.1:${address.port}`, wsUrl: `ws://127.0.0.1:${address.port}/ws` };
+  relayDirectories.set(relay, stateDirectory);
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { Origin: baseUrl, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'relaytest', password: 'correct horse battery staple' })
+  });
+  assert.equal(response.status, 200);
+  viewerHeaders = { Origin: baseUrl, Cookie: response.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ') };
+  return { relay, baseUrl, wsUrl: `ws://127.0.0.1:${address.port}/ws`, stateDirectory };
 }
 
 async function createPair(baseUrl) {
@@ -20,9 +35,10 @@ async function createPair(baseUrl) {
   return response.json();
 }
 
-function openSocket(url, message) {
+function openSocket(url, message, headers) {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url);
+    const useViewerSession = ['join', 'connect-device'].includes(message.type);
+    const socket = new WebSocket(url, { headers: headers || (useViewerSession ? viewerHeaders : {}) });
     socket.once('error', reject);
     socket.once('open', () => socket.send(JSON.stringify(message)));
     socket.once('message', (data, binary) => {
@@ -90,7 +106,10 @@ function nextBinary(socket) {
 
 afterEach(async () => {
   await Promise.all([...relays].map((relay) => relay.close()));
+  for (const directory of relayDirectories.values()) fs.rmSync(directory, { recursive: true, force: true });
   relays.clear();
+  relayDirectories.clear();
+  viewerHeaders = {};
 });
 
 test('serves the complete browser workbench and creates a short-lived, secret-backed pair', async () => {
@@ -240,7 +259,7 @@ test('rejects expired codes and refuses a second viewer for an occupied room', a
   const currentPair = await createPair(baseUrl);
   const currentSource = await openSocket(wsUrl, { type: 'authenticate', code: currentPair.code, secret: currentPair.secret });
   const viewer = await openSocket(wsUrl, { type: 'join', code: currentPair.code });
-  await assert.rejects(openSocket(wsUrl, { type: 'join', code: currentPair.code }), /已被其他查看设备使用/);
+  await assert.rejects(openSocket(wsUrl, { type: 'join', code: currentPair.code }), /已绑定/);
   currentSource.socket.close();
   viewer.socket.close();
 });
@@ -280,25 +299,98 @@ test('heartbeat pings keep an idle established pair open', async () => {
   source.socket.send(JSON.stringify({ type: 'stop' }));
 });
 
-test('disconnecting either peer revokes an established pair and closes the other peer', async () => {
-  for (const departingRole of ['source', 'viewer']) {
-    const { relay, baseUrl, wsUrl } = await startRelay();
-    const pair = await createPair(baseUrl);
-    const source = await openSocket(wsUrl, { type: 'authenticate', code: pair.code, secret: pair.secret });
-    const viewer = await openSocket(wsUrl, { type: 'join', code: pair.code });
-    const departing = departingRole === 'source' ? source.socket : viewer.socket;
-    const peer = departingRole === 'source' ? viewer.socket : source.socket;
-    const peerClosed = new Promise((resolve) => peer.once('close', resolve));
-    departing.close();
-    const didPeerClose = await Promise.race([
-      peerClosed.then(() => true),
-      new Promise((resolve) => setTimeout(() => resolve(false), 300))
-    ]);
+test('viewer refresh reconnects by account device id without reusing a pairing code', async () => {
+  const { relay, baseUrl, wsUrl } = await startRelay({ roomTtlMs: 10 });
+  const pair = await createPair(baseUrl);
+  const source = await openSocket(wsUrl, { type: 'authenticate', code: pair.code, secret: pair.secret });
+  const viewer = await openSocket(wsUrl, { type: 'join', code: pair.code });
+  const room = relay.rooms.get(pair.code.replace('-', ''));
 
-    assert.equal(didPeerClose, true, `${departingRole} disconnect should close its peer`);
-    assert.equal(relay.rooms.has(pair.code.replace('-', '')), false);
-    await assert.rejects(openSocket(wsUrl, { type: 'join', code: pair.code }), /无效或已过期/);
-  }
+  const viewerDisconnected = nextJson(source.socket, 'viewer-disconnected');
+  const oldViewerClosed = new Promise((resolve) => viewer.socket.once('close', resolve));
+  viewer.socket.close();
+  await Promise.all([viewerDisconnected, oldViewerClosed]);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  relay.sweepExpiredRooms();
+  assert.equal(relay.rooms.has(pair.code.replace('-', '')), true);
+  assert.equal(source.socket.readyState, WebSocket.OPEN);
+
+  await assert.rejects(openSocket(wsUrl, { type: 'join', code: pair.code }), /已绑定/);
+  const sourceNotified = nextJson(source.socket, 'viewer-connected');
+  const resumed = await openSocket(wsUrl, { type: 'connect-device', deviceId: viewer.firstMessage.deviceId });
+  assert.equal(resumed.firstMessage.type, 'joined');
+  assert.equal((await sourceNotified).resumed, true);
+  assert.equal(relay.rooms.get(pair.code.replace('-', '')).viewer.readyState, WebSocket.OPEN);
+
+  const frameRequest = nextJson(source.socket, 'frame-request');
+  const receivedFrame = nextBinary(resumed.socket);
+  resumed.socket.send(JSON.stringify({ type: 'request-frame' }));
+  await frameRequest;
+  source.socket.send(Buffer.from('resumed-frame'));
+  assert.equal((await receivedFrame).toString(), 'resumed-frame');
+
+  source.socket.send(JSON.stringify({ type: 'stop' }));
+  await assert.rejects(openSocket(wsUrl, { type: 'connect-device', deviceId: viewer.firstMessage.deviceId }), /不存在或无权访问/);
+});
+
+test('account device access replaces a still-open viewer while pairing code alone is denied', async () => {
+  const { relay, baseUrl, wsUrl } = await startRelay();
+  const pair = await createPair(baseUrl);
+  const source = await openSocket(wsUrl, { type: 'authenticate', code: pair.code, secret: pair.secret });
+  const firstViewer = await openSocket(wsUrl, { type: 'join', code: pair.code });
+
+  await assert.rejects(openSocket(wsUrl, { type: 'join', code: pair.code }), /已绑定/);
+  assert.equal(firstViewer.socket.readyState, WebSocket.OPEN);
+  const firstViewerClosed = new Promise((resolve) => firstViewer.socket.once('close', resolve));
+  const secondViewer = await openSocket(wsUrl, { type: 'connect-device', deviceId: firstViewer.firstMessage.deviceId });
+  await firstViewerClosed;
+  assert.equal(relay.rooms.get(pair.code.replace('-', '')).viewer.readyState, WebSocket.OPEN);
+
+  source.socket.send(JSON.stringify({ type: 'stop' }));
+});
+
+test('messages already in flight from replaced source and viewer sockets cannot affect the active session', async () => {
+  const { relay, baseUrl, wsUrl } = await startRelay();
+  const pair = await createPair(baseUrl);
+  const source1 = await openSocket(wsUrl, { type: 'authenticate', code: pair.code, secret: pair.secret });
+  const room = relay.rooms.get(pair.code.replace('-', ''));
+  const staleSourceSocket = room.source;
+  staleSourceSocket._socket.pause();
+  source1.socket.send(JSON.stringify({ type: 'stop' }));
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const source2 = await openSocket(wsUrl, { type: 'authenticate', code: pair.code, secret: pair.secret });
+  staleSourceSocket._socket.resume();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(relay.rooms.get(pair.code.replace('-', '')), room);
+  assert.equal(room.source.readyState, WebSocket.OPEN);
+
+  const viewer1 = await openSocket(wsUrl, { type: 'join', code: pair.code });
+  const staleViewerSocket = room.viewer;
+  staleViewerSocket._socket.pause();
+  viewer1.socket.send(JSON.stringify({ type: 'disconnect' }));
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const sourceNotified = nextJson(source2.socket, 'viewer-connected');
+  const viewer2 = await openSocket(wsUrl, {
+    type: 'connect-device',
+    deviceId: viewer1.firstMessage.deviceId
+  });
+  await sourceNotified;
+  staleViewerSocket._socket.resume();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(relay.rooms.get(pair.code.replace('-', '')), room);
+  assert.equal(room.viewer.readyState, WebSocket.OPEN);
+  assert.equal(room.source.readyState, WebSocket.OPEN);
+
+  const frameRequest = nextJson(source2.socket, 'frame-request');
+  const receivedFrame = nextBinary(viewer2.socket);
+  viewer2.socket.send(JSON.stringify({ type: 'request-frame' }));
+  await frameRequest;
+  source2.socket.send(Buffer.from('current-viewer-frame'));
+  assert.equal((await receivedFrame).toString(), 'current-viewer-frame');
+  source2.socket.send(JSON.stringify({ type: 'stop' }));
 });
 
 test('stopping the source immediately revokes its pairing code', async () => {
@@ -312,6 +404,20 @@ test('stopping the source immediately revokes its pairing code', async () => {
   await viewerClosed;
   assert.equal(relay.rooms.size, 0);
   await assert.rejects(openSocket(wsUrl, { type: 'join', code: pair.code }), /无效或已过期/);
+});
+
+test('manually disconnecting the viewer preserves the registered device and source session', async () => {
+  const { relay, baseUrl, wsUrl } = await startRelay();
+  const pair = await createPair(baseUrl);
+  const source = await openSocket(wsUrl, { type: 'authenticate', code: pair.code, secret: pair.secret });
+  const viewer = await openSocket(wsUrl, { type: 'join', code: pair.code });
+  viewer.socket.send(JSON.stringify({ type: 'disconnect' }));
+  await nextJson(source.socket, 'viewer-disconnected');
+  assert.equal(relay.rooms.size, 1);
+  assert.equal(source.socket.readyState, WebSocket.OPEN);
+  const reconnect = await openSocket(wsUrl, { type: 'connect-device', deviceId: viewer.firstMessage.deviceId });
+  assert.equal(reconnect.firstMessage.type, 'joined');
+  source.socket.send(JSON.stringify({ type: 'stop' }));
 });
 
 test('bounds idle WebSocket connections and connection attempts', async () => {

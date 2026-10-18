@@ -10,7 +10,10 @@ Group=screenbridge
 WorkingDirectory=/opt/screenbridge/server
 Environment=HOST=127.0.0.1
 Environment=PORT=3086
+Environment=SCREENBRIDGE_STATE_DIR=/var/lib/screenbridge
 Environment=NODE_OPTIONS=--max-old-space-size=128
+StateDirectory=screenbridge
+StateDirectoryMode=0700
 ExecStart=/opt/screenbridge/node/bin/node /opt/screenbridge/server/relay.js
 Restart=on-failure
 RestartSec=3
