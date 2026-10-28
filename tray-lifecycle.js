@@ -1,5 +1,11 @@
 'use strict';
 
+const path = require('node:path');
+
+function getTrayIconPath(assetsDirectory, platform = process.platform) {
+  return path.join(assetsDirectory, platform === 'darwin' ? 'icon.png' : 'icon.ico');
+}
+
 function createTrayLifecycle({ app, Tray, Menu, getWindow, iconPath, canQuit = () => true }) {
   let appIsQuitting = false;
   const tray = new Tray(iconPath);
@@ -41,4 +47,4 @@ function createTrayLifecycle({ app, Tray, Menu, getWindow, iconPath, canQuit = (
   return { attachWindow, showWindow, tray };
 }
 
-module.exports = { createTrayLifecycle };
+module.exports = { createTrayLifecycle, getTrayIconPath };

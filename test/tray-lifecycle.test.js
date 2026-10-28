@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
-const { createTrayLifecycle } = require('../tray-lifecycle');
+const { createTrayLifecycle, getTrayIconPath } = require('../tray-lifecycle');
 
 class FakeWindow extends EventEmitter {
   constructor() {
@@ -72,6 +72,15 @@ test('closing the window hides it while tray clicks restore it', () => {
   assert.equal(tray.toolTip, '屏桥 ScreenBridge');
   assert.equal(tray.menu[0].label, '显示屏桥');
   assert.equal(tray.menu[2].label, '退出屏桥');
+});
+
+test('the menu bar uses a macOS image while Windows keeps its ICO tray icon', () => {
+  const path = require('node:path');
+  const assetsDirectory = path.join('app', 'assets');
+
+  assert.equal(typeof getTrayIconPath, 'function');
+  assert.equal(getTrayIconPath(assetsDirectory, 'darwin'), path.join(assetsDirectory, 'icon.png'));
+  assert.equal(getTrayIconPath(assetsDirectory, 'win32'), path.join(assetsDirectory, 'icon.ico'));
 });
 
 test('the explicit tray exit allows the window to close and destroys the tray icon', () => {

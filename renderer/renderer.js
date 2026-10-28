@@ -947,7 +947,12 @@ async function startScreenMonitor() {
   } catch (error) {
     monitorStarted = false;
     elements.shortcutStatus.textContent = '监听启动失败，将使用单次截图';
-    setCaptureStatus(`监听启动失败：${error.message || error}`, true);
+    let message = error.message || error;
+    try {
+      const permissionMessage = await api.getScreenCapturePermissionMessage();
+      if (permissionMessage) message = permissionMessage;
+    } catch {}
+    setCaptureStatus(`监听启动失败：${message}`, true);
   }
 }
 

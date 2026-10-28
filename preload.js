@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('assistantAPI', {
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config) => ipcRenderer.invoke('save-config', config),
   getScreenSource: () => ipcRenderer.invoke('get-screen-source'),
+  getScreenCapturePermissionMessage: () => ipcRenderer.invoke('get-screen-capture-permission-message'),
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
   startLanShare: () => ipcRenderer.invoke('start-lan-share'),
   stopLanShare: () => ipcRenderer.invoke('stop-lan-share'),

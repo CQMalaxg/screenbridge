@@ -9,7 +9,8 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
-    "check": "node --check main.js && node --check cloud-pair.js && node --check prompt-presets.js && node --check preload.js && node --check cloud-device-store.js && node --check cloud-reconnect-policy.js && node --check cloud-stop-policy.js && node --check cloud-auto-start.js && node --check tray-lifecycle.js && node --check renderer/renderer.js && node --check server/relay.js && node --check server/security-store.js && node --check server/public/viewer.js && node --check server/public/workbench.js",
+    "dist:mac": "electron-builder --mac --universal --publish never",
+    "check": "node --check main.js && node --check cloud-pair.js && node --check prompt-presets.js && node --check preload.js && node --check cloud-device-store.js && node --check cloud-reconnect-policy.js && node --check cloud-stop-policy.js && node --check cloud-auto-start.js && node --check tray-lifecycle.js && node --check screen-capture-errors.js && node --check renderer/renderer.js && node --check server/relay.js && node --check server/security-store.js && node --check server/public/viewer.js && node --check server/public/workbench.js",
     "test": "node --test server/test/*.test.js test/*.test.js"
   },
   "build": {
@@ -25,6 +26,7 @@
       "cloud-stop-policy.js",
       "cloud-auto-start.js",
       "tray-lifecycle.js",
+      "screen-capture-errors.js",
       "renderer/**/*",
       "assets/**/*",
       "package.json"
@@ -35,6 +37,14 @@
         "zip"
       ],
       "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.productivity"
     }
   },
   "devDependencies": {

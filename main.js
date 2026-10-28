@@ -10,6 +10,7 @@ const {
   safeStorage,
   screen,
   session,
+  systemPreferences,
   Tray
 } = require('electron');
 const crypto = require('crypto');
@@ -21,13 +22,15 @@ const path = require('path');
 const WebSocket = require('ws');
 const { normalizeCloudPairCredentials } = require('./cloud-pair');
 const { getDefaultPromptPresets } = require('./prompt-presets');
-const { createTrayLifecycle } = require('./tray-lifecycle');
+const { createTrayLifecycle, getTrayIconPath } = require('./tray-lifecycle');
 const { CloudDeviceStore } = require('./cloud-device-store');
 const { cloudRetryDelay } = require('./cloud-reconnect-policy');
 const { cloudStopIsSafeToExit, settleCloudStopQuit, stopCloudDeviceSafely } = require('./cloud-stop-policy');
-const { getCloudAutoStart, setCloudAutoStart } = require('./cloud-auto-start');
+const { getCloudAutoStart, setCloudAutoStart, shouldStartHidden } = require('./cloud-auto-start');
+const { getScreenCapturePermissionMessage } = require('./screen-capture-errors');
 
 let mainWindow;
+let initialWindowCreated = false;
 let trayLifecycle = null;
 let isQuitting = false;
 let activeAbortController = null;
@@ -270,6 +273,24 @@ function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function screenCapturePermissionMessage() {
+  let accessStatus = 'unknown';
+  try {
+    if (process.platform === 'darwin') accessStatus = systemPreferences.getMediaAccessStatus('screen');
+  } catch {}
+  return getScreenCapturePermissionMessage(process.platform, accessStatus);
+}
+
+async function getScreenSources(options) {
+  try {
+    return await desktopCapturer.getSources(options);
+  } catch (error) {
+    const permissionMessage = screenCapturePermissionMessage();
+    if (permissionMessage) throw new Error(permissionMessage, { cause: error });
+    throw error;
+  }
+}
+
 async function capturePrimaryScreen() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     throw new Error('应用窗口尚未准备好');
@@ -289,7 +310,7 @@ async function capturePrimaryScreen() {
       width: Math.max(1920, Math.min(displaySize.width, 3840)),
       height: Math.max(1080, Math.min(displaySize.height, 2160))
     };
-    const sources = await desktopCapturer.getSources({
+    const sources = await getScreenSources({
       types: ['screen'],
       thumbnailSize,
       fetchWindowIcons: false
@@ -298,7 +319,7 @@ async function capturePrimaryScreen() {
     const source =
       sources.find((item) => String(item.display_id) === String(primaryDisplay.id)) || sources[0];
     if (!source || !source.thumbnail || source.thumbnail.isEmpty()) {
-      throw new Error('没有找到可用的屏幕画面');
+      throw new Error(screenCapturePermissionMessage() || '没有找到可用的屏幕画面');
     }
 
     const dataUrl = source.thumbnail.toDataURL();
@@ -347,8 +368,7 @@ function extractStreamText(payload, apiBackend) {
 
 function extractScreenSource() {
   const primaryDisplay = screen.getPrimaryDisplay();
-  return desktopCapturer
-    .getSources({
+  return getScreenSources({
       types: ['screen'],
       thumbnailSize: { width: 1, height: 1 },
       fetchWindowIcons: false
@@ -356,7 +376,7 @@ function extractScreenSource() {
     .then((sources) => {
       const source =
         sources.find((item) => String(item.display_id) === String(primaryDisplay.id)) || sources[0];
-      if (!source) throw new Error('没有找到可监听的屏幕');
+      if (!source) throw new Error(screenCapturePermissionMessage() || '没有找到可监听的屏幕');
       return { id: source.id, name: source.name, displayId: source.display_id };
     });
 }
@@ -1266,7 +1286,7 @@ function createWindow() {
     minHeight: 650,
     backgroundColor: '#f5f7fb',
     title: '屏桥 ScreenBridge',
-    show: !process.argv.includes('--hidden'),
+    show: initialWindowCreated || !shouldStartHidden(app),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1274,6 +1294,7 @@ function createWindow() {
     }
   });
 
+  initialWindowCreated = true;
   trayLifecycle?.attachWindow(mainWindow);
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
@@ -1294,6 +1315,7 @@ app.whenReady().then(() => {
     return saved;
   });
   ipcMain.handle('get-screen-source', () => extractScreenSource());
+  ipcMain.handle('get-screen-capture-permission-message', () => screenCapturePermissionMessage());
   ipcMain.handle('capture-screen', () => capturePrimaryScreen());
   ipcMain.handle('start-lan-share', () => startLanShare());
   ipcMain.handle('stop-lan-share', () => stopLanShare());
@@ -1370,7 +1392,7 @@ app.whenReady().then(() => {
     Menu,
     getWindow: () => mainWindow,
     canQuit: () => !cloudStopPending || cloudStopSafeToExit || allowUnsafeCloudStopExit,
-    iconPath: path.join(__dirname, 'assets', 'icon.ico')
+    iconPath: getTrayIconPath(path.join(__dirname, 'assets'))
   });
   createWindow();
   if (cloudPairCredentials) connectCloudPair();
